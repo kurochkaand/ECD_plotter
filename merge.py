@@ -11,11 +11,11 @@ from openpyxl.drawing.text import (
 from pathlib import Path
 
 folder = Path(
-    # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260720_PLGA-preliminary"
+    "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260720_PLGA-preliminary"
     # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260721_PLGA-first-tiration/"
     # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260721_PLGA-metals/"
     # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260722-PLGA-pH3-methals/"
-    "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260722-PLGA-pH-titrat/"
+    # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260722-PLGA-pH-titrat/"
     # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260722-PDGA-pH-titrat/"
 )
 
@@ -81,18 +81,23 @@ if not concentration_file.exists():
         {
             "spectrum": sample_names,
             "concentration_coefficient": 1.0,
+            "Ph": 7.0,
         }
     )
     concentration_table.to_csv(concentration_file, sep="\t", index=False)
     print(f"Created {concentration_file}")
 else:
     concentration_table = pd.read_csv(concentration_file, sep="\t")
-    if concentration_table.shape[1] != 2:
+    if concentration_table.shape[1] not in (2, 3):
         raise ValueError(
-            f"{concentration_file} must have exactly two tab-separated columns: "
-            "spectrum name and concentration coefficient"
+            f"{concentration_file} must have two or three tab-separated columns: "
+            "spectrum name, concentration coefficient, and optional Ph"
         )
-    concentration_table.columns = ["spectrum", "concentration_coefficient"]
+    concentration_table.columns = [
+        "spectrum",
+        "concentration_coefficient",
+        *(["Ph"] if concentration_table.shape[1] == 3 else []),
+    ]
     concentration_table["spectrum"] = (
         concentration_table["spectrum"].astype(str).str.strip()
     )
