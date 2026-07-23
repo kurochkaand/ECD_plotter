@@ -19,6 +19,8 @@ folder = Path(
     # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260722-PDGA-pH-titrat/"
 )
 
+analized_wavelength = 222
+
 files = sorted(folder.glob("*.csv"))
 water_files = [file for file in files if file.stem.lower() == "water"]
 
