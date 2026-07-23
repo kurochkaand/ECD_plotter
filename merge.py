@@ -7,6 +7,7 @@ folder = Path(
 )
 
 result = None
+summary = None
 
 for file in sorted(folder.glob("*.csv")):
     # Read only the block between XYDATA and Extended Information.
@@ -38,15 +39,20 @@ for file in sorted(folder.glob("*.csv")):
 
     if result is None:
         result = df[["wavelength_nm"]].copy()
+        summary = df[["wavelength_nm"]].copy()
     elif not result["wavelength_nm"].equals(df["wavelength_nm"]):
         raise ValueError(f"X axis in {file} does not match the other files")
 
     result[f"{file.stem}_cd_mdeg"] = df["cd_mdeg"]
     result[f"{file.stem}_ht_v"] = df["ht_v"]
+    summary[file.stem] = df["cd_mdeg"]
 
 if result is None:
     raise FileNotFoundError(f"No CSV files found directly inside {folder}")
 
 output_file = folder.parent / f"{folder.name}-combined.xlsx"
-result.to_excel(output_file, index=False)
+with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
+    result.to_excel(writer, sheet_name="RAW", index=False)
+    summary.to_excel(writer, sheet_name="SUMMARY", index=False)
+
 print(f"Saved {output_file}")
