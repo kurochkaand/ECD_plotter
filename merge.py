@@ -11,15 +11,14 @@ from openpyxl.drawing.text import (
 from pathlib import Path
 
 folder = Path(
-    "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260720_PLGA-preliminary"
+    # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260720_PLGA-preliminary"
     # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260721_PLGA-first-tiration/"
     # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260721_PLGA-metals/"
     # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260722-PLGA-pH3-methals/"
     # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260722-PLGA-pH-titrat/"
     # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260722-PDGA-pH-titrat/"
+    "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260727-PLGA-pH8-methals/"
 )
-
-analized_wavelength = 222
 
 files = sorted(folder.glob("*.csv"))
 water_files = [file for file in files if file.stem.lower() == "water"]
