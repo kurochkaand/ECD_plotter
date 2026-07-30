@@ -1,13 +1,5 @@
 import pandas as pd
 from io import StringIO
-from openpyxl.chart import Reference, ScatterChart, Series
-from openpyxl.chart.text import RichText
-from openpyxl.drawing.text import (
-    CharacterProperties,
-    Font,
-    Paragraph,
-    ParagraphProperties,
-)
 from pathlib import Path
 
 folder = Path(
@@ -17,10 +9,20 @@ folder = Path(
     # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260722-PLGA-pH3-methals/"
     # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260722-PLGA-pH-titrat/"
     # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260722-PDGA-pH-titrat/"
-    "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260727-PLGA-pH8-methals/"
+    # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260727-PLGA-pH8-methals/"
+    "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260729-PLGA-pH8-methals/"
 )
 
-files = sorted(folder.glob("*.csv"))
+def file_creation_time(file: Path) -> float:
+    """Return the file creation time, with a fallback for non-macOS systems."""
+    file_stat = file.stat()
+    return getattr(file_stat, "st_birthtime", file_stat.st_ctime)
+
+
+files = sorted(
+    folder.glob("*.csv"),
+    key=lambda file: (file_creation_time(file), file.name.lower()),
+)
 water_files = [file for file in files if file.stem.lower() == "water"]
 
 if not files:
@@ -31,7 +33,6 @@ if len(water_files) != 1:
     )
 
 water_file = water_files[0]
-files = [water_file, *(file for file in files if file != water_file)]
 
 result = None
 cd_data = {}
@@ -155,80 +156,5 @@ with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
     result.to_excel(writer, sheet_name="RAW", index=False)
     summary.to_excel(writer, sheet_name="SUMMARY", index=False)
 
-    summary_sheet = writer.sheets["SUMMARY"]
-    chart = ScatterChart()
-    chart.title = "Water-corrected CD spectra"
-    chart.style = 13
-    chart.scatterStyle = "line"
-    chart.x_axis.title = "Wavelength (nm)"
-    chart.y_axis.title = "CD (mdeg)"
-    chart.x_axis.scaling.min = 0
-    chart.x_axis.scaling.max = 300
-    chart.x_axis.scaling.orientation = "minMax"
-    chart.x_axis.majorGridlines = None
-    chart.y_axis.majorGridlines = None
-    chart.legend.position = "b"
-    chart.height = 11.25
-    chart.width = 22.5
-
-    arial_10 = RichText(
-        p=[
-            Paragraph(
-                pPr=ParagraphProperties(
-                    defRPr=CharacterProperties(
-                        latin=Font(typeface="Arial"),
-                        sz=1000,
-                    )
-                )
-            )
-        ]
-    )
-    chart.x_axis.txPr = arial_10
-    chart.y_axis.txPr = arial_10
-    chart.legend.txPr = arial_10
-
-    x_values = Reference(
-        summary_sheet,
-        min_col=1,
-        min_row=2,
-        max_row=len(summary) + 1,
-    )
-    zero_column = len(cd_data) + 2
-    plotted_values = summary.iloc[:, zero_column - 1 :].to_numpy()
-    y_min = float(plotted_values.min())
-    y_max = float(plotted_values.max())
-    y_range = y_max - y_min
-    y_margin = y_range * 0.01 if y_range else max(abs(y_min) * 0.01, 0.01)
-    chart.y_axis.scaling.min = y_min - y_margin
-    chart.y_axis.scaling.max = y_max + y_margin
-
-    excel_colors = ["C00000", "A5A5A5", "FFC000", "5B9BD5"]
-    for column in range(zero_column, summary.shape[1] + 1):
-        y_values = Reference(
-            summary_sheet,
-            min_col=column,
-            min_row=2,
-            max_row=len(summary) + 1,
-        )
-        series = Series(
-            y_values,
-            x_values,
-            title=summary_sheet.cell(row=1, column=column).value,
-        )
-        series.smooth = False
-        series.marker.symbol = "none"
-        series.graphicalProperties.line.width = 19050  # Excel's 1.5 pt line.
-        if column == zero_column:
-            series.graphicalProperties.line.solidFill = "000000"
-            series.graphicalProperties.line.prstDash = "sysDot"
-        else:
-            color_index = column - zero_column - 1
-            series.graphicalProperties.line.solidFill = excel_colors[
-                color_index % len(excel_colors)
-            ]
-            series.graphicalProperties.line.prstDash = "solid"
-        chart.series.append(series)
-
-    summary_sheet.add_chart(chart, "A10")
 
 print(f"Saved {output_file}")
