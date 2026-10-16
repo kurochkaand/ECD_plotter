@@ -13,6 +13,8 @@ from math import isfinite
 from pathlib import Path
 
 import pandas as pd
+from openpyxl.utils import get_column_letter
+from openpyxl.workbook.properties import CalcProperties
 
 
 DEFAULT_FOLDER = Path(
@@ -239,8 +241,57 @@ def load_concentration_coefficients(
     return concentration_table["concentration_coefficient"]
 
 
-def merge_spectra(folder: Path, *, refresh_ph: bool = False) -> Path:
-    """Write CD, HT, Abs, and SUMMARY sheets on the instrument's wavelength axis."""
+def select_subtraction_reference(sample_names: list[str], prefix: str | None) -> str | None:
+    """Require one matching spectrum only when subtraction is requested."""
+    if prefix is None:
+        return None
+    normalized_prefix = prefix.strip().casefold()
+    if not normalized_prefix:
+        raise ValueError("The --subtract filename prefix cannot be empty.")
+    matches = [name for name in sample_names if name.casefold().startswith(normalized_prefix)]
+    if len(matches) != 1:
+        details = f": {', '.join(matches)}" if matches else ""
+        raise ValueError(
+            f"Expected exactly one spectrum starting with {prefix!r}; "
+            f"found {len(matches)}{details}"
+        )
+    return matches[0]
+
+
+def corrected_cd_columns(
+    cd_data: dict[str, pd.Series],
+    coefficients: pd.Series,
+    subtraction_reference: str | None,
+) -> list[pd.Series]:
+    """Normalize CD, using Excel formulas when a reference must be subtracted."""
+    if subtraction_reference is None:
+        return [
+            (signal / coefficients[name]).rename(name)
+            for name, signal in cd_data.items()
+        ]
+
+    reference_column = get_column_letter(list(cd_data).index(subtraction_reference) + 2)
+    corrected_columns = []
+    for column, (name, signal) in enumerate(cd_data.items(), start=2):
+        if name == subtraction_reference:
+            continue
+        source_column = get_column_letter(column)
+        coefficient = float(coefficients[name])
+        formulas = []
+        for row in range(2, len(signal) + 2):
+            difference = f"{source_column}{row}-${reference_column}{row}"
+            formulas.append(
+                f"={difference}" if coefficient == 1.0
+                else f"=({difference})/{coefficient!r}"
+            )
+        corrected_columns.append(pd.Series(formulas, index=signal.index, name=name))
+    return corrected_columns
+
+
+def merge_spectra(
+    folder: Path, *, refresh_ph: bool = False, subtract: str | None = None
+) -> Path:
+    """Write CD, HT, Abs, and CD_subtr sheets on the instrument's wavelength axis."""
     files = find_spectral_files(folder)
     reference_frame: pd.DataFrame | None = None
     channel_columns: dict[str, list[pd.Series]] = {
@@ -262,20 +313,18 @@ def merge_spectra(folder: Path, *, refresh_ph: bool = False) -> Path:
         cd_data[file.stem] = frame["cd_mdeg"]
 
     sample_names = list(cd_data)
+    subtraction_reference = select_subtraction_reference(sample_names, subtract)
     coefficients = load_concentration_coefficients(
         folder, sample_names, refresh_ph=refresh_ph
     )
 
-    # Keep raw CD values before the zero separator and normalized values after it.
+    # Keep raw CD before the zero separator and corrected CD after it.
     summary = pd.concat(
         [
             channel_columns["CD"][0],
             *(cd_data[name].rename(name) for name in sample_names),
             pd.Series(0, index=channel_columns["CD"][0].index, name="zero"),
-            *(
-                (cd_data[name] / coefficients[name]).rename(name)
-                for name in sample_names
-            ),
+            *corrected_cd_columns(cd_data, coefficients, subtraction_reference),
         ],
         axis=1,
     )
@@ -284,7 +333,11 @@ def merge_spectra(folder: Path, *, refresh_ph: bool = False) -> Path:
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
         for sheet_name, columns in channel_columns.items():
             pd.concat(columns, axis=1).to_excel(writer, sheet_name=sheet_name, index=False)
-        summary.to_excel(writer, sheet_name="SUMMARY", index=False)
+        summary.to_excel(writer, sheet_name="CD_subtr", index=False)
+        if subtraction_reference is not None:
+            writer.book.calculation = CalcProperties(
+                calcMode="auto", fullCalcOnLoad=True, forceFullCalc=True
+            )
     return output_file
 
 
@@ -303,10 +356,17 @@ def main() -> int:
         action="store_true",
         help="Update existing Ph values from filenames, keeping concentration coefficients.",
     )
+    parser.add_argument(
+        "--subtract",
+        metavar="PREFIX",
+        help="Subtract the CD spectrum matching this filename prefix using Excel formulas.",
+    )
     args = parser.parse_args()
 
     try:
-        output_file = merge_spectra(args.folder.resolve(), refresh_ph=args.refresh_ph)
+        output_file = merge_spectra(
+            args.folder.resolve(), refresh_ph=args.refresh_ph, subtract=args.subtract
+        )
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+from openpyxl import load_workbook
 
 import merge
 import spectral_component_analysis as analysis
@@ -55,11 +56,11 @@ class MergeTests(unittest.TestCase):
         output = merge.merge_spectra(self.folder)
         self.assertEqual(output, self.folder.parent / "instrument data-combined.xlsx")
         with pd.ExcelFile(output) as workbook:
-            self.assertEqual(workbook.sheet_names, ["CD", "HT", "Abs", "SUMMARY"])
+            self.assertEqual(workbook.sheet_names, ["CD", "HT", "Abs", "CD_subtr"])
             cd = pd.read_excel(workbook, sheet_name="CD")
             ht = pd.read_excel(workbook, sheet_name="HT")
             absorbance = pd.read_excel(workbook, sheet_name="Abs")
-            summary = pd.read_excel(workbook, sheet_name="SUMMARY", header=None)
+            summary = pd.read_excel(workbook, sheet_name="CD_subtr", header=None)
         for channel in (cd, ht, absorbance):
             self.assertEqual(channel.columns.tolist(), ["wavelength_nm", "sample"])
             self.assertEqual(channel["wavelength_nm"].tolist(), [200, 201, 202])
@@ -177,7 +178,7 @@ class MergeTests(unittest.TestCase):
             for sheet_name in ("CD", "HT", "Abs"):
                 channel = pd.read_excel(workbook, sheet_name=sheet_name)
                 self.assertEqual(channel.columns.tolist(), ["wavelength_nm", *expected_names])
-        summary = pd.read_excel(output, sheet_name="SUMMARY", header=None)
+        summary = pd.read_excel(output, sheet_name="CD_subtr", header=None)
         table = pd.read_csv(table_file, sep="\t")
         self.assertEqual(
             summary.iloc[0].tolist(),
@@ -300,7 +301,7 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(frame.index.tolist(), [0, 1, 2])
         output = merge.merge_spectra(self.folder)
         with pd.ExcelFile(output) as workbook:
-            self.assertEqual(workbook.sheet_names, ["CD", "HT", "Abs", "SUMMARY"])
+            self.assertEqual(workbook.sheet_names, ["CD", "HT", "Abs", "CD_subtr"])
             for sheet_name, expected_sample, expected_other in (
                 ("CD", [5, 8, 11], [1, 2, 3]),
                 ("HT", [500, 500, 500], [650, 650, 650]),
@@ -326,7 +327,7 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(len(merge.find_spectral_files(self.folder)), 3)
 
         output = merge.merge_spectra(self.folder)
-        summary = pd.read_excel(output, sheet_name="SUMMARY", header=None)
+        summary = pd.read_excel(output, sheet_name="CD_subtr", header=None)
         headers = summary.iloc[0].tolist()
         for name, expected in (
             ("sample", [2.5, 4, 5.5]),
@@ -339,6 +340,77 @@ class MergeTests(unittest.TestCase):
                 np.testing.assert_allclose(
                     summary.iloc[1:, columns[-1]].to_numpy(dtype=float), expected
                 )
+
+    def test_subtraction_writes_formulas_for_each_wavelength_and_preserves_raw_data(self):
+        self.write_spectrum("H2O_reference", [1, 2, 3], time="19:00:00")
+        self.write_spectrum("later sample", [4, 6, 8], time="20:00:00")
+        self.write_coefficients("sample\t2\nH2O_reference\t3\nlater sample\t1\n")
+        output = merge.merge_spectra(self.folder, subtract="h2o")
+        workbook = load_workbook(output, data_only=False)
+        self.addCleanup(workbook.close)
+        self.assertEqual(workbook.sheetnames, ["CD", "HT", "Abs", "CD_subtr"])
+        sheet = workbook["CD_subtr"]
+        self.assertEqual([cell.value for cell in sheet[1]], [
+            "wavelength_nm", "sample", "H2O_reference", "later sample", "zero",
+            "sample", "later sample",
+        ])
+        for row in range(2, 5):
+            self.assertEqual(sheet.cell(row, 6).value, f"=(B{row}-$C{row})/2.0")
+            self.assertEqual(sheet.cell(row, 7).value, f"=D{row}-$C{row}")
+            self.assertEqual(sheet.cell(row, 6).data_type, "f")
+            self.assertEqual(sheet.cell(row, 7).data_type, "f")
+        self.assertEqual([sheet.cell(row, 2).value for row in range(2, 5)], [5, 8, 11])
+        self.assertEqual([sheet.cell(row, 3).value for row in range(2, 5)], [1, 2, 3])
+        self.assertEqual(workbook["CD"]["B2"].value, 5)
+        self.assertEqual(workbook["CD"]["C2"].value, 1)
+        self.assertEqual(workbook["HT"]["B2"].value, 500)
+        self.assertEqual(workbook["Abs"]["B2"].value, 0.25)
+        self.assertEqual(workbook.calculation.calcMode, "auto")
+        self.assertTrue(workbook.calculation.fullCalcOnLoad)
+        self.assertTrue(workbook.calculation.forceFullCalc)
+
+    def test_subtraction_handles_reference_columns_after_z(self):
+        for index in range(25):
+            self.write_spectrum(f"other_{index:02}", [4, 6, 8], time="19:00:00")
+        self.write_spectrum("H2O_reference", [1, 2, 3], time="20:00:00")
+        output = merge.merge_spectra(self.folder, subtract="H2O")
+        workbook = load_workbook(output, data_only=False)
+        self.addCleanup(workbook.close)
+        sheet = workbook["CD_subtr"]
+        self.assertEqual(sheet["AB1"].value, "H2O_reference")
+        self.assertEqual(sheet["AD2"].value, "=B2-$AB2")
+        self.assertEqual(sheet["AD4"].value, "=B4-$AB4")
+
+    def test_missing_or_ambiguous_subtraction_reference_does_not_write_outputs(self):
+        table_file = self.folder / "concentration_table.txt"
+        for prefix, expected in (("H2O", "found 0"), (" ", "cannot be empty")):
+            with self.subTest(prefix=prefix):
+                with self.assertRaisesRegex(ValueError, expected):
+                    merge.merge_spectra(self.folder, subtract=prefix)
+                self.assertFalse(table_file.exists())
+                self.assertFalse((self.folder.parent / "instrument data-combined.xlsx").exists())
+
+        self.write_spectrum("H2O_1", [1, 2, 3])
+        self.write_spectrum("H2O_2", [2, 3, 4])
+        with self.assertRaisesRegex(ValueError, "found 2") as raised:
+            merge.merge_spectra(self.folder, subtract="H2O")
+        self.assertIn("H2O_1", str(raised.exception))
+        self.assertIn("H2O_2", str(raised.exception))
+        self.assertFalse(table_file.exists())
+
+    def test_cli_subtract_option_writes_excel_formulas(self):
+        self.write_spectrum("H2O_reference", [1, 2, 3], time="19:00:00")
+        result = subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "merge.py"),
+             "--folder", str(self.folder), "--subtract", "H2O"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        workbook = load_workbook(
+            self.folder.parent / "instrument data-combined.xlsx", data_only=False
+        )
+        self.addCleanup(workbook.close)
+        self.assertEqual(workbook["CD_subtr"]["E2"].value, "=B2-$C2")
 
     def test_invalid_concentration_coefficients_are_rejected(self):
         for coefficient in ("0", "-1", "NaN", "inf", "-inf"):

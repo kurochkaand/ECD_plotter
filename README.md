@@ -56,12 +56,31 @@ The workbook is saved beside the data folder as `<folder-name>-combined.xlsx`:
 - `CD`: wavelength plus the original CD signal for each input file, in mdeg.
 - `HT`: wavelength plus the original HT signal for each input file, in V.
 - `Abs`: wavelength plus the original absorbance for each input file.
-- `SUMMARY`: wavelength, raw sample CD, a zero separator, then normalized
-  sample CD calculated as `sample / concentration_coefficient`.
+- `CD_subtr`: wavelength, raw sample CD, a zero separator, then normalized
+  sample CD calculated as `sample / concentration_coefficient`, or reference-
+  subtracted CD formulas when `--subtract` is supplied.
 
 Each channel sheet starts with `wavelength_nm`, followed by one column per spectrum
 named after the CSV filename without its extension. The `RAW` sheet is replaced
-by these three channel sheets. Only CD is concentration-normalized in `SUMMARY`.
+by these three channel sheets. Only CD is concentration-normalized in `CD_subtr`.
+
+To subtract a reference spectrum, provide its filename prefix:
+
+```powershell
+.\.venv\Scripts\python.exe merge.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14" --subtract "H2O"
+```
+
+The prefix must match exactly one spectrum, ignoring case. The reference remains
+in the raw columns of `CD_subtr`; after the zero separator, each other spectrum
+gets Excel formulas for `(sample - reference) / concentration_coefficient`.
+The reference itself is omitted from the corrected block. With a coefficient of
+`1.0`, a formula might be `=B2-$O2`; with a coefficient of `2.0`, it becomes
+`=(B2-$O2)/2.0`. The reference column is fixed, and each wavelength uses its own
+row. The raw `CD`, `HT`, and `Abs` sheets retain their original signals.
+
+Excel calculates the formulas when the workbook opens. Open and save the workbook
+in Excel before reading calculated subtraction values with Python or another tool
+that relies on stored formula results.
 
 All input wavelength axes must match the earliest acquired CSV. A mismatch
 reports the first differing data row, physical CSV line numbers, expected and

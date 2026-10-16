@@ -12,9 +12,11 @@ MCR-ALS. See [the project README](README.md) for Python installation and setup.
 - At least five wavelength points must remain after filtering.
 
 The analysis reads every column after A as a measured spectrum. Prepare a workbook
-containing only the spectra you want to analyze. The merge script's `SUMMARY`
+containing only the spectra you want to analyze. The merge script's `CD_subtr`
 sheet includes both raw and corrected data and a zero separator, so select the
-appropriate columns into a separate `Sheet1` first.
+appropriate columns into a separate `Sheet1` first. If merging with `--subtract`,
+open and save the workbook in Excel to calculate its formulas before preparing
+the numeric input for analysis.
 
 ## Configure the script
 
