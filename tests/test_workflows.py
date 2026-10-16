@@ -76,6 +76,83 @@ class MergeTests(unittest.TestCase):
             "spectrum": ["sample"], "concentration_coefficient": [1.0], "Ph": [7.0],
         })
 
+    def test_ph_is_extracted_from_filename_tokens(self):
+        for name, expected in (
+            ("Cd-peptide_0.2ekv_pH7.43_1mm_185-300nm_4sc_20nm-1", 7.43),
+            ("Cd-peptide_1.6ekv_pH5.77_1mm_185-300nm_4sc_20nm-1", 5.77),
+            ("peptide_pH2.18_201uL_1mm_185-300nm_4sc_20nm-1", 2.18),
+            ("peptide_pH7.9_0uL_1mm_185-300nm_4sc_20nm-1", 7.9),
+            ("peptide_pH 7.01_21uL_1mm_185-300nm_4sc_20nm-1", 7.01),
+            ("peptide_PH8_1mm", 8.0),
+            ("pH0", 0.0),
+            ("peptide_pH-0.5_1mm", -0.5),
+            ("H2O_1mm_185-300nm_4sc_20nm-1", None),
+            ("phosphate_7.43_1mm", None),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(merge.extract_ph_from_name(name), expected)
+
+    def test_new_table_uses_filename_ph_and_default_for_missing_tokens(self):
+        names = [
+            "Cd-peptide_0.2ekv_pH7.43_1mm_185-300nm_4sc_20nm-1",
+            "peptide_pH7.9_0uL_1mm_185-300nm_4sc_20nm-1",
+            "H2O_1mm_185-300nm_4sc_20nm-1",
+        ]
+        merge.load_concentration_coefficients(self.folder, names)
+        table = pd.read_csv(self.folder / "concentration_table.txt", sep="\t")
+        self.assertEqual(table["spectrum"].tolist(), names)
+        self.assertEqual(table["Ph"].tolist(), [7.43, 7.9, 7.0])
+        self.assertEqual(table["concentration_coefficient"].tolist(), [1.0, 1.0, 1.0])
+
+    def test_missing_ph_in_existing_tables_is_inferred(self):
+        for contents in (
+            "spectrum\tconcentration_coefficient\nsample_pH5.77\t2\n",
+            "spectrum\tconcentration_coefficient\tPh\nsample_pH5.77\t2\t\n",
+        ):
+            with self.subTest(contents=contents):
+                table_file = self.folder / "concentration_table.txt"
+                table_file.write_text(contents, encoding="utf-8")
+                merge.load_concentration_coefficients(self.folder, ["sample_pH5.77"])
+                table = pd.read_csv(table_file, sep="\t")
+                self.assertEqual(table["Ph"].tolist(), [5.77])
+                self.assertEqual(table["concentration_coefficient"].tolist(), [2])
+
+    def test_existing_ph_is_preserved_unless_refresh_is_requested(self):
+        table_file = self.folder / "concentration_table.txt"
+        table_file.write_text(
+            "spectrum\tconcentration_coefficient\tPh\n"
+            "sample_pH7.43\t2\t6.8\nH2O_1mm\t3\t6.5\n",
+            encoding="utf-8",
+        )
+        names = ["sample_pH7.43", "H2O_1mm"]
+        merge.load_concentration_coefficients(self.folder, names)
+        table = pd.read_csv(table_file, sep="\t")
+        self.assertEqual(table["Ph"].tolist(), [6.8, 6.5])
+
+        merge.load_concentration_coefficients(self.folder, names, refresh_ph=True)
+        table = pd.read_csv(table_file, sep="\t")
+        self.assertEqual(table["Ph"].tolist(), [7.43, 6.5])
+        self.assertEqual(table["concentration_coefficient"].tolist(), [2, 3])
+
+    def test_cli_refreshes_ph_and_preserves_concentration_coefficients(self):
+        self.write_spectrum("peptide_pH5.77", [4, 8, 12], time="19:00:00")
+        table_file = self.folder / "concentration_table.txt"
+        table_file.write_text(
+            "spectrum\tconcentration_coefficient\tPh\n"
+            "sample\t2\t6.5\npeptide_pH5.77\t4\t7.0\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "merge.py"),
+             "--folder", str(self.folder), "--refresh-ph"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        table = pd.read_csv(table_file, sep="\t")
+        self.assertEqual(table["spectrum"].tolist(), ["sample", "peptide_pH5.77"])
+        self.assertEqual(table["Ph"].tolist(), [6.5, 5.77])
+        self.assertEqual(table["concentration_coefficient"].tolist(), [2, 4])
+
     def test_workbook_and_existing_table_follow_acquisition_datetime(self):
         self.write_spectrum("a_later", [4, 8, 12], date="26/10/15", time="00:00:00")
         self.write_spectrum("z_earlier", [5, 10, 15], date="26/10/13", time="11:59:59 PM")

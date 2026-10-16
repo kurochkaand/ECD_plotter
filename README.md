@@ -30,12 +30,23 @@ produce an error identifying the file and cell. Each file must contain an
 Every CSV is treated as a sample.
 
 On the first run, the script creates `concentration_table.txt` in the data folder
-with a concentration coefficient of `1.0` and `Ph` of `7.0` for each sample.
+with a concentration coefficient of `1.0` for each sample. `Ph` is extracted from
+the filename: `pH7.43` gives `7.43`, and `pH7.9` gives `7.9`. A space after `pH`
+is accepted. Files without pH in the name, such as `H2O_1mm_185-300nm_4sc_20nm-1.csv`,
+use the default `7.0`.
 Edit the tab-separated table and rerun the command to apply the coefficients.
 Each run sorts the table rows into acquisition order, keeping existing coefficients
 and `Ph` values attached to their spectrum names. Both workbook sheets use this
 same spectrum order for their columns.
-Existing two-column tables without `Ph` are also accepted. Coefficients must be
+Missing `Ph` columns or blank values in existing tables are populated the same way.
+To replace existing pH values with those from the filenames while keeping your
+concentration coefficients, add `--refresh-ph`:
+
+```powershell
+.\.venv\Scripts\python.exe merge.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14" --refresh-ph
+```
+
+Values for filenames without pH are preserved when refreshing. Coefficients must be
 finite and greater than zero. `Ph` is retained as metadata and is not used in
 the correction.
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import sys
 from datetime import datetime
 from io import StringIO
@@ -135,7 +136,19 @@ def validate_wavelength_axis(
         )
 
 
-def load_concentration_coefficients(folder: Path, sample_names: list[str]) -> pd.Series:
+def extract_ph_from_name(spectrum_name: str) -> float | None:
+    """Read a pH number from a filename stem, allowing a space after pH."""
+    match = re.search(
+        r"(?:^|[_\s-])ph\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))(?=$|[_\s-])",
+        spectrum_name,
+        flags=re.IGNORECASE,
+    )
+    return float(match.group(1)) if match else None
+
+
+def load_concentration_coefficients(
+    folder: Path, sample_names: list[str], *, refresh_ph: bool = False
+) -> pd.Series:
     """Create or validate the concentration table and return coefficients by name."""
     concentration_file = folder / "concentration_table.txt"
     created = not concentration_file.exists()
@@ -144,7 +157,6 @@ def load_concentration_coefficients(folder: Path, sample_names: list[str]) -> pd
             {
                 "spectrum": sample_names,
                 "concentration_coefficient": 1.0,
-                "Ph": 7.0,
             }
         )
     else:
@@ -173,6 +185,18 @@ def load_concentration_coefficients(folder: Path, sample_names: list[str]) -> pd
             raise ValueError(
                 f"Duplicate spectra in {concentration_file}: {', '.join(duplicates)}"
             )
+
+    inferred_ph = concentration_table["spectrum"].map(extract_ph_from_name).astype(float)
+    if "Ph" not in concentration_table:
+        concentration_table["Ph"] = inferred_ph.fillna(7.0)
+    elif refresh_ph:
+        concentration_table["Ph"] = inferred_ph.fillna(
+            concentration_table["Ph"]
+        ).fillna(7.0)
+    else:
+        concentration_table["Ph"] = concentration_table["Ph"].fillna(
+            inferred_ph
+        ).fillna(7.0)
 
     concentration_table["concentration_coefficient"] = pd.to_numeric(
         concentration_table["concentration_coefficient"], errors="raise"
@@ -208,7 +232,7 @@ def load_concentration_coefficients(folder: Path, sample_names: list[str]) -> pd
     return concentration_table["concentration_coefficient"]
 
 
-def merge_spectra(folder: Path) -> Path:
+def merge_spectra(folder: Path, *, refresh_ph: bool = False) -> Path:
     """Write RAW and SUMMARY sheets, preserving the instrument's wavelength axis."""
     files = find_spectral_files(folder)
     reference_frame: pd.DataFrame | None = None
@@ -233,7 +257,9 @@ def merge_spectra(folder: Path) -> Path:
 
     raw = pd.concat(raw_columns, axis=1)
     sample_names = list(cd_data)
-    coefficients = load_concentration_coefficients(folder, sample_names)
+    coefficients = load_concentration_coefficients(
+        folder, sample_names, refresh_ph=refresh_ph
+    )
 
     # Keep raw CD values before the zero separator and normalized values after it.
     summary = pd.concat(
@@ -266,10 +292,15 @@ def main() -> int:
         default=DEFAULT_FOLDER,
         help="Data-folder override for DEFAULT_FOLDER configured in the script.",
     )
+    parser.add_argument(
+        "--refresh-ph",
+        action="store_true",
+        help="Update existing Ph values from filenames, keeping concentration coefficients.",
+    )
     args = parser.parse_args()
 
     try:
-        output_file = merge_spectra(args.folder.resolve())
+        output_file = merge_spectra(args.folder.resolve(), refresh_ph=args.refresh_ph)
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
