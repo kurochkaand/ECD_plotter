@@ -28,14 +28,14 @@ class MergeTests(unittest.TestCase):
         self.write_spectrum("sample", [5, 8, 11])
 
     def write_spectrum(
-        self, name, cd, wavelengths=(200, 201, 202), extra_channel=None,
-        date="26/10/14", time="18:41:36",
+        self, name, cd, wavelengths=(200, 201, 202), absorbance=0.25,
+        date="26/10/14", time="18:41:36", ht=500,
     ):
         rows = []
         for wavelength, signal in zip(wavelengths, cd):
-            values = [wavelength, signal, 500]
-            if extra_channel is not None:
-                values.append(extra_channel)
+            values = [wavelength, signal, ht]
+            if absorbance is not None:
+                values.append(absorbance)
             rows.append(",".join(map(str, values)) + "\n")
         (self.folder / f"{name}.csv").write_text(
             "TITLE,Instrument export\nDATA TYPE,\nORIGIN,JASCO\nOWNER,\n"
@@ -55,11 +55,17 @@ class MergeTests(unittest.TestCase):
         output = merge.merge_spectra(self.folder)
         self.assertEqual(output, self.folder.parent / "instrument data-combined.xlsx")
         with pd.ExcelFile(output) as workbook:
-            self.assertEqual(workbook.sheet_names, ["RAW", "SUMMARY"])
-            raw = pd.read_excel(workbook, sheet_name="RAW")
+            self.assertEqual(workbook.sheet_names, ["CD", "HT", "Abs", "SUMMARY"])
+            cd = pd.read_excel(workbook, sheet_name="CD")
+            ht = pd.read_excel(workbook, sheet_name="HT")
+            absorbance = pd.read_excel(workbook, sheet_name="Abs")
             summary = pd.read_excel(workbook, sheet_name="SUMMARY", header=None)
-        self.assertEqual(raw["sample_cd_mdeg"].tolist(), [5, 8, 11])
-        self.assertEqual(raw["sample_ht_v"].tolist(), [500, 500, 500])
+        for channel in (cd, ht, absorbance):
+            self.assertEqual(channel.columns.tolist(), ["wavelength_nm", "sample"])
+            self.assertEqual(channel["wavelength_nm"].tolist(), [200, 201, 202])
+        self.assertEqual(cd["sample"].tolist(), [5, 8, 11])
+        self.assertEqual(ht["sample"].tolist(), [500, 500, 500])
+        self.assertEqual(absorbance["sample"].tolist(), [0.25, 0.25, 0.25])
         self.assertEqual(
             summary.iloc[0].tolist(),
             ["wavelength_nm", "sample", "zero", "sample"],
@@ -167,13 +173,12 @@ class MergeTests(unittest.TestCase):
         expected_names = ["z_earlier", "morning", "sample", "a_later"]
 
         output = merge.merge_spectra(self.folder)
-        raw = pd.read_excel(output, sheet_name="RAW")
+        with pd.ExcelFile(output) as workbook:
+            for sheet_name in ("CD", "HT", "Abs"):
+                channel = pd.read_excel(workbook, sheet_name=sheet_name)
+                self.assertEqual(channel.columns.tolist(), ["wavelength_nm", *expected_names])
         summary = pd.read_excel(output, sheet_name="SUMMARY", header=None)
         table = pd.read_csv(table_file, sep="\t")
-        self.assertEqual(raw.columns.tolist(), [
-            "wavelength_nm",
-            *(column for name in expected_names for column in (f"{name}_cd_mdeg", f"{name}_ht_v")),
-        ])
         self.assertEqual(
             summary.iloc[0].tolist(),
             ["wavelength_nm", *expected_names, "zero", *expected_names],
@@ -284,19 +289,35 @@ class MergeTests(unittest.TestCase):
         output = merge.merge_spectra(self.folder)
         self.assertTrue(output.is_file())
 
-    def test_four_column_exports_keep_wavelength_cd_and_ht_in_correct_columns(self):
-        self.write_spectrum("sample", [5, 8, 11], extra_channel=0.25)
-        self.write_spectrum("other sample", [1, 2, 3], extra_channel=0.5)
+    def test_four_column_exports_are_written_to_separate_channel_sheets(self):
+        self.write_spectrum("sample", [5, 8, 11], absorbance=0.25)
+        self.write_spectrum("other sample", [1, 2, 3], absorbance=0.5, ht=650)
         frame = merge.read_spectrum(self.folder / "sample.csv")
         self.assertEqual(frame["wavelength_nm"].tolist(), [200, 201, 202])
         self.assertEqual(frame["cd_mdeg"].tolist(), [5, 8, 11])
         self.assertEqual(frame["ht_v"].tolist(), [500, 500, 500])
+        self.assertEqual(frame["absorbance"].tolist(), [0.25, 0.25, 0.25])
         self.assertEqual(frame.index.tolist(), [0, 1, 2])
         output = merge.merge_spectra(self.folder)
-        raw = pd.read_excel(output, sheet_name="RAW")
-        self.assertEqual(raw["wavelength_nm"].tolist(), [200, 201, 202])
-        self.assertEqual(raw["sample_cd_mdeg"].tolist(), [5, 8, 11])
-        self.assertEqual(raw["other sample_cd_mdeg"].tolist(), [1, 2, 3])
+        with pd.ExcelFile(output) as workbook:
+            self.assertEqual(workbook.sheet_names, ["CD", "HT", "Abs", "SUMMARY"])
+            for sheet_name, expected_sample, expected_other in (
+                ("CD", [5, 8, 11], [1, 2, 3]),
+                ("HT", [500, 500, 500], [650, 650, 650]),
+                ("Abs", [0.25, 0.25, 0.25], [0.5, 0.5, 0.5]),
+            ):
+                with self.subTest(sheet_name=sheet_name):
+                    channel = pd.read_excel(workbook, sheet_name=sheet_name)
+                    self.assertEqual(channel["wavelength_nm"].tolist(), [200, 201, 202])
+                    self.assertEqual(channel["sample"].tolist(), expected_sample)
+                    self.assertEqual(channel["other sample"].tolist(), expected_other)
+
+    def test_three_column_exports_leave_absorbance_blank(self):
+        self.write_spectrum("sample", [5, 8, 11], absorbance=None)
+        output = merge.merge_spectra(self.folder)
+        absorbance = pd.read_excel(output, sheet_name="Abs")
+        self.assertEqual(absorbance["wavelength_nm"].tolist(), [200, 201, 202])
+        self.assertTrue(absorbance["sample"].isna().all())
 
     def test_all_filenames_are_treated_as_samples(self):
         self.write_spectrum("water", [1, 2, 3])

@@ -25,8 +25,9 @@ acquisition date in cell B5 and time in cell B6, earliest first. Dates use `YY/M
 (for example, `26/10/14` means October 14, 2026) or `YYYY/MM/DD`. Times can use
 `18:41:36` or `6:41:36 PM`. Filename order breaks ties. Missing or invalid timestamps
 produce an error identifying the file and cell. Each file must contain an
-`XYDATA` block with wavelength, CD, and HT columns followed by
-`##### Extended Information`. Additional channels, such as absorbance, are ignored.
+`XYDATA` block with wavelength, CD, HT, and Abs columns followed by
+`##### Extended Information`. Older three-column exports are also accepted, with
+blank Abs values.
 Every CSV is treated as a sample.
 
 On the first run, the script creates `concentration_table.txt` in the data folder
@@ -36,7 +37,7 @@ is accepted. Files without pH in the name, such as `H2O_1mm_185-300nm_4sc_20nm-1
 use the default `7.0`.
 Edit the tab-separated table and rerun the command to apply the coefficients.
 Each run sorts the table rows into acquisition order, keeping existing coefficients
-and `Ph` values attached to their spectrum names. Both workbook sheets use this
+and `Ph` values attached to their spectrum names. All workbook sheets use this
 same spectrum order for their columns.
 Missing `Ph` columns or blank values in existing tables are populated the same way.
 To replace existing pH values with those from the filenames while keeping your
@@ -52,9 +53,15 @@ the correction.
 
 The workbook is saved beside the data folder as `<folder-name>-combined.xlsx`:
 
-- `RAW`: wavelength plus the original CD and HT columns for every input file.
+- `CD`: wavelength plus the original CD signal for each input file, in mdeg.
+- `HT`: wavelength plus the original HT signal for each input file, in V.
+- `Abs`: wavelength plus the original absorbance for each input file.
 - `SUMMARY`: wavelength, raw sample CD, a zero separator, then normalized
   sample CD calculated as `sample / concentration_coefficient`.
+
+Each channel sheet starts with `wavelength_nm`, followed by one column per spectrum
+named after the CSV filename without its extension. The `RAW` sheet is replaced
+by these three channel sheets. Only CD is concentration-normalized in `SUMMARY`.
 
 All input wavelength axes must match the earliest acquired CSV. A mismatch
 reports the first differing data row, physical CSV line numbers, expected and

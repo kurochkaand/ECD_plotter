@@ -18,7 +18,8 @@ import pandas as pd
 DEFAULT_FOLDER = Path(
     r"X:\Cations_and_PGA\ECD-Szeged\K.Andrii\260730-PLGA-titration-Zn"
 )
-SPECTRAL_COLUMNS = ["wavelength_nm", "cd_mdeg", "ht_v"]
+SPECTRAL_COLUMNS = ["wavelength_nm", "cd_mdeg", "ht_v", "absorbance"]
+CHANNEL_SHEETS = {"CD": "cd_mdeg", "HT": "ht_v", "Abs": "absorbance"}
 CONCENTRATION_COLUMNS = ["spectrum", "concentration_coefficient", "Ph"]
 
 
@@ -83,11 +84,17 @@ def read_spectrum(file: Path) -> pd.DataFrame:
     frame = pd.read_csv(
         StringIO(data_block),
         header=None,
-        names=SPECTRAL_COLUMNS,
-        usecols=range(len(SPECTRAL_COLUMNS)),
         index_col=False,
         skip_blank_lines=True,
     )
+    if frame.shape[1] < 3:
+        raise ValueError(
+            f"Expected wavelength, CD, and HT columns with optional Abs in {file}; "
+            f"found {frame.shape[1]} columns"
+        )
+    # Older three-column exports have no absorbance; keep their Abs cells blank.
+    frame = frame.reindex(columns=range(len(SPECTRAL_COLUMNS)))
+    frame.columns = SPECTRAL_COLUMNS
     frame.attrs["csv_lines"] = [
         row_number + 1
         for row_number in range(data_start, data_end)
@@ -233,29 +240,27 @@ def load_concentration_coefficients(
 
 
 def merge_spectra(folder: Path, *, refresh_ph: bool = False) -> Path:
-    """Write RAW and SUMMARY sheets, preserving the instrument's wavelength axis."""
+    """Write CD, HT, Abs, and SUMMARY sheets on the instrument's wavelength axis."""
     files = find_spectral_files(folder)
     reference_frame: pd.DataFrame | None = None
-    raw_columns: list[pd.Series] = []
+    channel_columns: dict[str, list[pd.Series]] = {
+        sheet_name: [] for sheet_name in CHANNEL_SHEETS
+    }
     cd_data: dict[str, pd.Series] = {}
 
     for file in files:
         frame = read_spectrum(file)
         if reference_frame is None:
             reference_frame = frame
-            raw_columns.append(frame["wavelength_nm"])
+            for columns in channel_columns.values():
+                columns.append(frame["wavelength_nm"])
         else:
             validate_wavelength_axis(reference_frame, frame, files[0], file)
 
-        raw_columns.extend(
-            [
-                frame["cd_mdeg"].rename(f"{file.stem}_cd_mdeg"),
-                frame["ht_v"].rename(f"{file.stem}_ht_v"),
-            ]
-        )
+        for sheet_name, column_name in CHANNEL_SHEETS.items():
+            channel_columns[sheet_name].append(frame[column_name].rename(file.stem))
         cd_data[file.stem] = frame["cd_mdeg"]
 
-    raw = pd.concat(raw_columns, axis=1)
     sample_names = list(cd_data)
     coefficients = load_concentration_coefficients(
         folder, sample_names, refresh_ph=refresh_ph
@@ -264,9 +269,9 @@ def merge_spectra(folder: Path, *, refresh_ph: bool = False) -> Path:
     # Keep raw CD values before the zero separator and normalized values after it.
     summary = pd.concat(
         [
-            raw["wavelength_nm"],
+            channel_columns["CD"][0],
             *(cd_data[name].rename(name) for name in sample_names),
-            pd.Series(0, index=raw.index, name="zero"),
+            pd.Series(0, index=channel_columns["CD"][0].index, name="zero"),
             *(
                 (cd_data[name] / coefficients[name]).rename(name)
                 for name in sample_names
@@ -277,7 +282,8 @@ def merge_spectra(folder: Path, *, refresh_ph: bool = False) -> Path:
 
     output_file = folder.parent / f"{folder.name}-combined.xlsx"
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
-        raw.to_excel(writer, sheet_name="RAW", index=False)
+        for sheet_name, columns in channel_columns.items():
+            pd.concat(columns, axis=1).to_excel(writer, sheet_name=sheet_name, index=False)
         summary.to_excel(writer, sheet_name="SUMMARY", index=False)
     return output_file
 
