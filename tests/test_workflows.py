@@ -49,8 +49,9 @@ class MergeTests(unittest.TestCase):
         date="26/10/14", time="18:41:36", ht=500,
     ):
         rows = []
-        for wavelength, signal in zip(wavelengths, cd):
-            values = [wavelength, signal, ht]
+        ht_values = np.repeat(ht, len(cd)) if np.isscalar(ht) else ht
+        for wavelength, signal, voltage in zip(wavelengths, cd, ht_values):
+            values = [wavelength, signal, voltage]
             if absorbance is not None:
                 values.append(absorbance)
             rows.append(",".join(map(str, values)) + "\n")
@@ -594,6 +595,131 @@ class MergeTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, f"invalid.csv must be {expected}"):
                     merge.smooth_cd_spectra({"invalid": pd.Series([1, value, 3])}, 3)
+
+    def test_ht_threshold_blanks_only_above_limit_for_each_spectrum(self):
+        self.write_spectrum("sample", [5, 8, 11], ht=[499, 500, 501])
+        self.write_spectrum("later sample", [2, 4, 6], ht=[501, 490, 500], time="19:00:00")
+        self.write_coefficients("sample\t2\nlater sample\t4\n")
+        output = merge.merge_spectra(self.folder, ht_threshold=500)
+        workbook = load_workbook(output, data_only=False)
+        self.addCleanup(workbook.close)
+        for column, expected in ((2, [5, 8, None]), (3, [None, 4, 6])):
+            actual = [workbook["CD"].cell(row, column).value for row in range(2, 5)]
+            self.assertEqual(actual, expected)
+        self.assertEqual([cell.value for cell in workbook["CD"]["A"]], ["wavelength_nm", 200, 201, 202])
+        self.assertEqual([workbook["HT"].cell(row, 2).value for row in range(2, 5)], [499, 500, 501])
+        self.assertEqual([workbook["Abs"].cell(row, 2).value for row in range(2, 5)], [0.25] * 3)
+        sheet = workbook["CD_subtr"]
+        self.assertEqual([sheet.cell(row, 5).value for row in range(2, 5)], [2.5, 4, None])
+        self.assertEqual([sheet.cell(row, 6).value for row in range(2, 5)], [None, 1, 1.5])
+
+    def test_ht_threshold_excludes_invalid_sample_or_reference_from_formulas_and_plot(self):
+        self.write_spectrum("sample", [5, 8, 11], ht=[499, 501, 499])
+        self.write_spectrum("H2O_reference", [1, 2, 3], ht=[501, 499, 499], time="19:00:00")
+        self.write_spectrum("later sample", [4, 6, 8], ht=[499, 499, 501], time="20:00:00")
+        self.write_coefficients("sample\t2\nH2O_reference\t3\nlater sample\t1\n")
+
+        def inspect_chart(*args, **kwargs):
+            axis = plt.gcf().axes[0]
+            self.assertIn("HT cutoff: 500 V", axis.get_title())
+            lines = axis.get_lines()
+            self.assertEqual([line.get_label() for line in lines], ["sample", "later sample"])
+            np.testing.assert_allclose(lines[0].get_ydata(), [np.nan, np.nan, 4], equal_nan=True)
+            np.testing.assert_allclose(lines[1].get_ydata(), [np.nan, 4, np.nan], equal_nan=True)
+
+        with patch.object(plt, "show", side_effect=inspect_chart):
+            output = merge.merge_spectra(self.folder, subtract="H2O", ht_threshold=500, plot=True)
+        workbook = load_workbook(output, data_only=False)
+        self.addCleanup(workbook.close)
+        sheet = workbook["CD_subtr"]
+        for coordinate in ("F2", "G2", "F3", "G4"):
+            self.assertIsNone(sheet[coordinate].value)
+            self.assertNotEqual(sheet[coordinate].data_type, "f")
+        self.assertEqual(sheet["F4"].value, "=(B4-$C4)/2.0")
+        self.assertEqual(sheet["G3"].value, "=D3-$C3")
+        self.assertEqual(sheet["B2"].value, 5)
+        self.assertIsNone(sheet["C2"].value)
+
+    def test_ht_filtering_precedes_smoothing_and_keeps_gaps(self):
+        positions = np.arange(31, dtype=float)
+        wavelengths = positions + 200
+        sample = np.sin(positions / 3) + 0.1 * (-1.0)**positions
+        sample[[0, 10, 30]] = 1e9
+        ht = np.full(31, 400)
+        ht[[0, 10, 30]] = 501
+        self.write_spectrum("sample", sample, wavelengths=wavelengths, ht=ht)
+        self.write_spectrum("H2O_reference", np.zeros(31), wavelengths=wavelengths, time="19:00:00", ht=300)
+        self.write_coefficients("sample\t2\nH2O_reference\t1\n")
+        expected = np.full(31, np.nan)
+        expected[1:10] = quadratic_window_fit(sample[1:10], 6)
+        expected[11:30] = quadratic_window_fit(sample[11:30], 6)
+
+        def inspect_chart(*args, **kwargs):
+            lines = plt.gcf().axes[0].get_lines()
+            np.testing.assert_allclose(lines[0].get_ydata(), expected / 2, atol=1e-12, equal_nan=True)
+
+        with patch.object(plt, "show", side_effect=inspect_chart):
+            output = merge.merge_spectra(self.folder, smooth=6, ht_threshold=500, subtract="H2O", plot=True)
+        workbook = load_workbook(output, data_only=False)
+        self.addCleanup(workbook.close)
+        actual = [workbook["CD_subtr"].cell(row, 2).value for row in range(2, 33)]
+        np.testing.assert_allclose(np.array(actual, dtype=float), expected, atol=1e-12, equal_nan=True)
+        for position in (0, 10, 30):
+            self.assertIsNone(workbook["CD"].cell(position + 2, 2).value)
+            self.assertIsNone(workbook["CD_subtr"].cell(position + 2, 5).value)
+        self.assertEqual(workbook["CD"].cell(3, 2).value, sample[1])
+
+    def test_smoothing_keeps_short_valid_runs_and_all_excluded_points(self):
+        for values in (
+            [np.nan, 2, 3, np.nan, 5, 6, np.nan],
+            [np.nan] * 7,
+        ):
+            with self.subTest(values=values):
+                result = merge.smooth_cd_spectra({"masked": pd.Series(values)}, 5, allow_gaps=True)["masked"]
+                np.testing.assert_allclose(result, values, equal_nan=True)
+
+    def test_all_cd_points_can_be_excluded_with_smoothing(self):
+        self.write_spectrum("sample", [5, 8, 11], ht=501)
+        output = merge.merge_spectra(self.folder, ht_threshold=500, smooth=3)
+        workbook = load_workbook(output, data_only=False)
+        self.addCleanup(workbook.close)
+        self.assertEqual([workbook["CD"].cell(row, 2).value for row in range(2, 5)], [None] * 3)
+        self.assertEqual([workbook["CD_subtr"].cell(row, 4).value for row in range(2, 5)], [None] * 3)
+
+    def test_cli_ht_threshold_supports_default_and_custom_values(self):
+        self.write_spectrum("sample", [5, 8, 11], ht=[500, 500.25, 500.75])
+        self.write_spectrum("H2O_reference", [1, 1, 1], ht=300, time="19:00:00")
+        for arguments, expected in (([], [5, None, None]), (["500.5"], [5, 8, None])):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run(
+                    [sys.executable, str(PROJECT_ROOT / "merge.py"),
+                     "--folder", str(self.folder), "--ht-threshold", *arguments,
+                     "--subtract", "H2O"],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                workbook = load_workbook(self.folder.parent / "instrument data-combined.xlsx", data_only=False)
+                try:
+                    self.assertEqual([workbook["CD"].cell(row, 2).value for row in range(2, 5)], expected)
+                    self.assertEqual(workbook["CD_subtr"]["E2"].value, "=B2-$C2")
+                    self.assertIsNone(workbook["CD_subtr"]["E4"].value)
+                finally:
+                    workbook.close()
+
+    def test_invalid_ht_thresholds_do_not_write_outputs(self):
+        for threshold in (-1, np.nan, np.inf, -np.inf):
+            with self.subTest(threshold=threshold):
+                with self.assertRaisesRegex(ValueError, "--ht-threshold value must be finite"):
+                    merge.merge_spectra(self.folder, ht_threshold=threshold)
+                self.assertFalse((self.folder / "concentration_table.txt").exists())
+                self.assertFalse((self.folder.parent / "instrument data-combined.xlsx").exists())
+
+    def test_ht_filtering_rejects_invalid_ht_values(self):
+        for value, expected in (("bad", "numeric"), (np.nan, "finite"), (np.inf, "finite")):
+            with self.subTest(value=value):
+                self.write_spectrum("sample", [5, 8, 11], ht=[400, value, 500])
+                with self.assertRaisesRegex(ValueError, f"sample.csv must be {expected}"):
+                    merge.merge_spectra(self.folder, ht_threshold=500)
 
     def test_invalid_concentration_coefficients_are_rejected(self):
         for coefficient in ("0", "-1", "NaN", "inf", "-inf"):

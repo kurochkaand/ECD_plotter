@@ -22,14 +22,15 @@ Alternatively, edit `DEFAULT_FOLDER` in `merge.py` and run it without `--folder`
 
 Supported flags for `merge.py` (all optional):
 
-| Flag | Purpose | Default |
-| --- | --- | --- |
-| `--folder PATH` | Folder containing the CSV exports. Quote paths containing spaces. | `DEFAULT_FOLDER` configured in `merge.py`. |
-| `--refresh-ph` | Replace existing pH values with values from filenames, preserving concentration coefficients and pH values for filenames without pH. | Preserve existing pH values; infer missing values. |
-| `--subtract PREFIX` | Subtract the CD reference whose filename starts with `PREFIX`, ignoring case, using Excel formulas. Exactly one spectrum must match. | No reference subtraction. |
-| `--plot` | Display all corrected CD spectra together in one Matplotlib chart after saving the workbook. Applies concentration normalization and any requested reference subtraction. | No plot window. |
-| `--smooth [POINTS]` | Smooth every CD spectrum, including the subtraction reference, before subtraction and concentration normalization. Savitzky-Golay, polynomial order 2, no padding. | No smoothing; `--smooth` alone uses 50 points. |
-| `-h`, `--help` | Display usage and supported flags, then exit. | Merge normally. |
+| Flag                     | Purpose                                                                                                                                                                   | Default                                             |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| `--folder PATH`          | Folder containing the CSV exports. Quote paths containing spaces.                                                                                                         | `DEFAULT_FOLDER` configured in `merge.py`.          |
+| `--refresh-ph`           | Replace existing pH values with values from filenames, preserving concentration coefficients and pH values for filenames without pH.                                      | Preserve existing pH values; infer missing values.  |
+| `--subtract PREFIX`      | Subtract the CD reference whose filename starts with `PREFIX`, ignoring case, using Excel formulas. Exactly one spectrum must match.                                      | No reference subtraction.                           |
+| `--plot`                 | Display all corrected CD spectra together in one Matplotlib chart after saving the workbook. Applies concentration normalization and any requested reference subtraction. | No plot window.                                     |
+| `--smooth [POINTS]`      | Smooth every CD spectrum, including the subtraction reference, before subtraction and concentration normalization. Savitzky-Golay, polynomial order 2, no padding.        | No smoothing; `--smooth` alone uses 50 points.      |
+| `--ht-threshold [VALUE]` | Blank CD values where that spectrum's HT exceeds `VALUE` V, before smoothing, subtraction, and normalization.                                                             | No HT filtering; `--ht-threshold` alone uses 500 V. |
+| `-h`, `--help`           | Display usage and supported flags, then exit.                                                                                                                             | Merge normally.                                     |
 
 The script reads CSV files directly inside the selected folder, ordered by the
 acquisition date in cell B5 and time in cell B6, earliest first. Dates use `YY/MM/DD`
@@ -64,7 +65,7 @@ the correction.
 
 The workbook is saved beside the data folder as `<folder-name>-combined.xlsx`:
 
-- `CD`: wavelength plus the original CD signal for each input file, in mdeg.
+- `CD`: wavelength plus the CD signal for each input file, in mdeg, with optional HT exclusions.
 - `HT`: wavelength plus the original HT signal for each input file, in V.
 - `Abs`: wavelength plus the original absorbance for each input file.
 - `CD_subtr`: wavelength, raw sample CD, a zero separator, then normalized
@@ -73,7 +74,8 @@ The workbook is saved beside the data folder as `<folder-name>-combined.xlsx`:
 
 With `--smooth`, the input CD block before the zero separator contains the smoothed
 signals. Subtraction formulas reference these smoothed values. The `CD` sheet
-retains the untreated measurements; `HT` and `Abs` also retain their original values.
+retains unsmoothed measurements, with any requested HT exclusions; `HT` and `Abs`
+retain their original values.
 
 Each channel sheet starts with `wavelength_nm`, followed by one column per spectrum
 named after the CSV filename without its extension. The `RAW` sheet is replaced
@@ -91,7 +93,8 @@ gets Excel formulas for `(sample - reference) / concentration_coefficient`.
 The reference itself is omitted from the corrected block. With a coefficient of
 `1.0`, a formula might be `=B2-$O2`; with a coefficient of `2.0`, it becomes
 `=(B2-$O2)/2.0`. The reference column is fixed, and each wavelength uses its own
-row. The raw `CD`, `HT`, and `Abs` sheets retain their original signals.
+row. HT exclusions apply to the `CD` sheet as well; `HT` and `Abs` retain their
+original signals.
 
 Excel calculates the formulas when the workbook opens. Open and save the workbook
 in Excel before reading calculated subtraction values with Python or another tool
@@ -129,6 +132,26 @@ signals, while the Excel subtraction cells remain formulas.
 
 ```powershell
 .\.venv\Scripts\python.exe merge.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14-Cd" --smooth 50 --subtract "H2O" --plot
+```
+
+Use `--ht-threshold 500` to exclude CD readings whose corresponding HT is **above**
+500 V. `--ht-threshold` without a value also selects 500 V; omitting the flag
+disables HT filtering. Values equal to the threshold are retained. Thresholds must
+be finite and non-negative.
+
+Filtering applies separately to each spectrum, including the subtraction reference.
+Affected CD cells are left blank in `CD` and `CD_subtr`; wavelength rows and other
+spectra at the same wavelength are retained. If a sample or reference CD cell is
+excluded, the corresponding subtraction result is also blank, with no formula
+treating the blank as zero. Plots leave gaps at these points. CSV files, HT values,
+and absorbance values are preserved.
+
+With `--smooth`, HT filtering happens first. Smoothing operates on each contiguous
+valid run, keeping excluded points blank. Runs shorter than the smoothing window
+are left unsmoothed; the requested window is not reduced and gaps are not filled.
+
+```powershell
+.\.venv\Scripts\python.exe merge.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14-Cd" --ht-threshold 500 --smooth 50 --subtract "H2O" --plot
 ```
 
 All input wavelength axes must match the earliest acquired CSV. A mismatch
