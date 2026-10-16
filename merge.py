@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import sys
+from datetime import datetime
 from io import StringIO
+from itertools import islice
 from math import isfinite
 from pathlib import Path
 
@@ -18,25 +21,41 @@ SPECTRAL_COLUMNS = ["wavelength_nm", "cd_mdeg", "ht_v"]
 CONCENTRATION_COLUMNS = ["spectrum", "concentration_coefficient", "Ph"]
 
 
-def find_spectral_files(folder: Path) -> tuple[list[Path], Path]:
-    """Find CSV files in Windows creation order and identify the water reference."""
+def read_acquisition_datetime(file: Path) -> datetime:
+    """Read YY/MM/DD and a 24-hour or AM/PM time from cells B5 and B6."""
+    with file.open(encoding="latin-1", newline="") as stream:
+        rows = list(islice(csv.reader(stream), 6))
+    date_text = rows[4][1].strip() if len(rows) > 4 and len(rows[4]) > 1 else ""
+    time_text = rows[5][1].strip() if len(rows) > 5 and len(rows[5]) > 1 else ""
+
+    for date_format in ("%y/%m/%d", "%Y/%m/%d"):
+        for time_format in ("%H:%M:%S", "%I:%M:%S %p"):
+            try:
+                return datetime.strptime(
+                    f"{date_text} {time_text}", f"{date_format} {time_format}"
+                )
+            except ValueError:
+                continue
+    raise ValueError(
+        f"Invalid acquisition date/time in {file}\n"
+        f"  B5 (CSV line 5): {date_text!r}; expected YY/MM/DD or YYYY/MM/DD\n"
+        f"  B6 (CSV line 6): {time_text!r}; expected HH:MM:SS or H:MM:SS AM/PM"
+    )
+
+
+def find_spectral_files(folder: Path) -> list[Path]:
+    """Find CSV files ordered by acquisition date/time, earliest first."""
     if not folder.is_dir():
         raise NotADirectoryError(f"Data folder not found: {folder}")
 
     files = sorted(
         (file for file in folder.glob("*.csv") if file.is_file()),
-        key=lambda file: (file.stat().st_birthtime, file.name.lower()),
+        key=lambda file: (read_acquisition_datetime(file), file.name.casefold()),
     )
     if not files:
         raise FileNotFoundError(f"No CSV files found directly inside {folder}")
 
-    water_files = [file for file in files if file.stem.lower().startswith("water")]
-    if len(water_files) != 1:
-        raise ValueError(
-            f"Expected exactly one CSV with a name starting with 'water' in {folder}, "
-            f"found {len(water_files)}"
-        )
-    return files, water_files[0]
+    return files
 
 
 def read_spectrum(file: Path) -> pd.DataFrame:
@@ -60,18 +79,67 @@ def read_spectrum(file: Path) -> pd.DataFrame:
     if not data_block.strip():
         raise ValueError(f"No spectral data found in {file}")
 
-    return pd.read_csv(
+    frame = pd.read_csv(
         StringIO(data_block),
         header=None,
         names=SPECTRAL_COLUMNS,
+        usecols=range(len(SPECTRAL_COLUMNS)),
+        index_col=False,
         skip_blank_lines=True,
     )
+    frame.attrs["csv_lines"] = [
+        row_number + 1
+        for row_number in range(data_start, data_end)
+        if lines[row_number].strip()
+    ]
+    frame.attrs["data_end_line"] = data_end + 1
+    return frame
+
+
+def validate_wavelength_axis(
+    reference: pd.DataFrame,
+    actual: pd.DataFrame,
+    reference_file: Path,
+    actual_file: Path,
+) -> None:
+    """Report the first differing wavelength using physical CSV line numbers."""
+    expected_axis = reference["wavelength_nm"].tolist()
+    actual_axis = actual["wavelength_nm"].tolist()
+    for row in range(max(len(expected_axis), len(actual_axis))):
+        has_expected = row < len(expected_axis)
+        has_actual = row < len(actual_axis)
+        expected_value = expected_axis[row] if has_expected else None
+        actual_value = actual_axis[row] if has_actual else None
+        if has_expected and has_actual and expected_value == actual_value:
+            continue
+
+        expected_line = (
+            reference.attrs["csv_lines"][row]
+            if has_expected else reference.attrs["data_end_line"]
+        )
+        actual_line = (
+            actual.attrs["csv_lines"][row]
+            if has_actual else actual.attrs["data_end_line"]
+        )
+        expected_text = (
+            f"{expected_value!r} nm" if has_expected else "<end of spectral data>"
+        )
+        actual_text = f"{actual_value!r} nm" if has_actual else "<end of spectral data>"
+        raise ValueError(
+            f"X axis mismatch in {actual_file}\n"
+            f"  Reference file: {reference_file}\n"
+            f"  Spectral data row: {row + 1}\n"
+            f"  Expected: {expected_text} (CSV line {expected_line})\n"
+            f"  Actual:   {actual_text} (CSV line {actual_line})\n"
+            f"  Data rows: expected {len(expected_axis)}, actual {len(actual_axis)}"
+        )
 
 
 def load_concentration_coefficients(folder: Path, sample_names: list[str]) -> pd.Series:
     """Create or validate the concentration table and return coefficients by name."""
     concentration_file = folder / "concentration_table.txt"
-    if not concentration_file.exists():
+    created = not concentration_file.exists()
+    if created:
         concentration_table = pd.DataFrame(
             {
                 "spectrum": sample_names,
@@ -79,18 +147,22 @@ def load_concentration_coefficients(folder: Path, sample_names: list[str]) -> pd
                 "Ph": 7.0,
             }
         )
-        concentration_table.to_csv(concentration_file, sep="\t", index=False)
-        print(f"Created {concentration_file}")
     else:
-        concentration_table = pd.read_csv(concentration_file, sep="\t")
-        if concentration_table.shape[1] not in (2, 3):
-            raise ValueError(
-                f"{concentration_file} must have two or three tab-separated columns: "
-                "spectrum name, concentration coefficient, and optional Ph"
+        with concentration_file.open(encoding="utf-8-sig", newline="") as stream:
+            header = next(csv.reader(stream, delimiter="\t"), [])
+            # Accept extra alignment tabs in a manually edited header.
+            column_count = sum(bool(column.strip()) for column in header)
+            if column_count not in (2, 3):
+                raise ValueError(
+                    f"{concentration_file} must have two or three tab-separated columns: "
+                    "spectrum name, concentration coefficient, and optional Ph"
+                )
+            concentration_table = pd.read_csv(
+                stream,
+                sep="\t",
+                header=None,
+                names=CONCENTRATION_COLUMNS[:column_count],
             )
-        concentration_table.columns = CONCENTRATION_COLUMNS[
-            : concentration_table.shape[1]
-        ]
         concentration_table["spectrum"] = (
             concentration_table["spectrum"].astype(str).str.strip()
         )
@@ -129,21 +201,27 @@ def load_concentration_coefficients(folder: Path, sample_names: list[str]) -> pd
             "Concentration coefficients must be finite and greater than zero for: "
             + ", ".join(invalid)
         )
-    return coefficients
+    concentration_table = concentration_table.set_index("spectrum").loc[sample_names]
+    concentration_table.to_csv(concentration_file, sep="\t", index=True)
+    if created:
+        print(f"Created {concentration_file}")
+    return concentration_table["concentration_coefficient"]
 
 
 def merge_spectra(folder: Path) -> Path:
     """Write RAW and SUMMARY sheets, preserving the instrument's wavelength axis."""
-    files, water_file = find_spectral_files(folder)
+    files = find_spectral_files(folder)
+    reference_frame: pd.DataFrame | None = None
     raw_columns: list[pd.Series] = []
     cd_data: dict[str, pd.Series] = {}
 
     for file in files:
         frame = read_spectrum(file)
-        if not raw_columns:
+        if reference_frame is None:
+            reference_frame = frame
             raw_columns.append(frame["wavelength_nm"])
-        elif not raw_columns[0].equals(frame["wavelength_nm"]):
-            raise ValueError(f"X axis in {file} does not match the other files")
+        else:
+            validate_wavelength_axis(reference_frame, frame, files[0], file)
 
         raw_columns.extend(
             [
@@ -154,20 +232,17 @@ def merge_spectra(folder: Path) -> Path:
         cd_data[file.stem] = frame["cd_mdeg"]
 
     raw = pd.concat(raw_columns, axis=1)
-    water_name = water_file.stem
-    water = cd_data[water_name]
-    sample_names = [name for name in cd_data if name != water_name]
+    sample_names = list(cd_data)
     coefficients = load_concentration_coefficients(folder, sample_names)
 
-    # Keep raw CD values before the zero separator and corrected values after it.
+    # Keep raw CD values before the zero separator and normalized values after it.
     summary = pd.concat(
         [
             raw["wavelength_nm"],
-            water.rename(water_name),
             *(cd_data[name].rename(name) for name in sample_names),
             pd.Series(0, index=raw.index, name="zero"),
             *(
-                ((cd_data[name] - water) / coefficients[name]).rename(name)
+                (cd_data[name] / coefficients[name]).rename(name)
                 for name in sample_names
             ),
         ],

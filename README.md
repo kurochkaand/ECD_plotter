@@ -20,15 +20,21 @@ py -3 -m venv .venv
 
 Alternatively, edit `DEFAULT_FOLDER` in `merge.py` and run it without `--folder`.
 
-The script reads CSV files directly inside the selected folder, ordered by Windows
-creation time, with filename order used to break ties. Each file must contain an
+The script reads CSV files directly inside the selected folder, ordered by the
+acquisition date in cell B5 and time in cell B6, earliest first. Dates use `YY/MM/DD`
+(for example, `26/10/14` means October 14, 2026) or `YYYY/MM/DD`. Times can use
+`18:41:36` or `6:41:36 PM`. Filename order breaks ties. Missing or invalid timestamps
+produce an error identifying the file and cell. Each file must contain an
 `XYDATA` block with wavelength, CD, and HT columns followed by
-`##### Extended Information`. Exactly one CSV filename must start with `water`
-(case insensitive); it supplies the water reference.
+`##### Extended Information`. Additional channels, such as absorbance, are ignored.
+Every CSV is treated as a sample.
 
 On the first run, the script creates `concentration_table.txt` in the data folder
 with a concentration coefficient of `1.0` and `Ph` of `7.0` for each sample.
 Edit the tab-separated table and rerun the command to apply the coefficients.
+Each run sorts the table rows into acquisition order, keeping existing coefficients
+and `Ph` values attached to their spectrum names. Both workbook sheets use this
+same spectrum order for their columns.
 Existing two-column tables without `Ph` are also accepted. Coefficients must be
 finite and greater than zero. `Ph` is retained as metadata and is not used in
 the correction.
@@ -36,11 +42,13 @@ the correction.
 The workbook is saved beside the data folder as `<folder-name>-combined.xlsx`:
 
 - `RAW`: wavelength plus the original CD and HT columns for every input file.
-- `SUMMARY`: wavelength, water CD, raw sample CD, a zero separator, then corrected
-  sample CD calculated as `(sample - water) / concentration_coefficient`.
+- `SUMMARY`: wavelength, raw sample CD, a zero separator, then normalized
+  sample CD calculated as `sample / concentration_coefficient`.
 
-All input wavelength axes must match exactly. Rerunning replaces the output workbook.
-Close it in Excel before rerunning.
+All input wavelength axes must match the earliest acquired CSV. A mismatch
+reports the first differing data row, physical CSV line numbers, expected and
+actual wavelengths, reference filename, and row counts. Rerunning replaces the
+output workbook. Close it in Excel before rerunning.
 
 ## Analyze spectral components
 

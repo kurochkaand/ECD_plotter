@@ -24,11 +24,15 @@ class MergeTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.folder = Path(temporary.name) / "instrument data"
         self.folder.mkdir()
-        self.write_spectrum("water", [1, 2, 3])
         self.write_spectrum("sample", [5, 8, 11])
 
-    def write_spectrum(self, name, cd, wavelengths=(200, 201, 202)):
-        rows = [f"{wavelength},{signal},500\n" for wavelength, signal in zip(wavelengths, cd)]
+    def write_spectrum(self, name, cd, wavelengths=(200, 201, 202), extra_channel=None):
+        rows = []
+        for wavelength, signal in zip(wavelengths, cd):
+            values = [wavelength, signal, 500]
+            if extra_channel is not None:
+                values.append(extra_channel)
+            rows.append(",".join(map(str, values)) + "\n")
         (self.folder / f"{name}.csv").write_text(
             "Instrument export\nXYDATA\n" + "".join(rows)
             + "##### Extended Information\n",
@@ -41,7 +45,7 @@ class MergeTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def test_workbook_preserves_raw_values_and_applies_correction(self):
+    def test_workbook_preserves_raw_values_and_normalizes_without_subtraction(self):
         self.write_coefficients("sample\t2\n")
         output = merge.merge_spectra(self.folder)
         self.assertEqual(output, self.folder.parent / "instrument data-combined.xlsx")
@@ -53,11 +57,11 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(raw["sample_ht_v"].tolist(), [500, 500, 500])
         self.assertEqual(
             summary.iloc[0].tolist(),
-            ["wavelength_nm", "water", "sample", "zero", "sample"],
+            ["wavelength_nm", "sample", "zero", "sample"],
         )
         np.testing.assert_allclose(
             summary.iloc[1:].to_numpy(dtype=float),
-            [[200, 1, 5, 0, 2], [201, 2, 8, 0, 3], [202, 3, 11, 0, 4]],
+            [[200, 5, 0, 2.5], [201, 8, 0, 4], [202, 11, 0, 5.5]],
         )
 
     def test_first_run_creates_default_concentration_table(self):
@@ -68,20 +72,98 @@ class MergeTests(unittest.TestCase):
         })
 
     def test_mismatched_wavelengths_do_not_write_workbook(self):
-        self.write_spectrum("sample", [5, 8, 11], wavelengths=(200, 201, 203))
-        with self.assertRaisesRegex(ValueError, "X axis"):
-            merge.merge_spectra(self.folder)
+        self.write_spectrum("other sample", [5, 8, 11], wavelengths=(200, 201, 203))
+        reference_file = self.folder / "sample.csv"
+        actual_file = self.folder / "other sample.csv"
+        with patch.object(merge, "find_spectral_files", return_value=[reference_file, actual_file]):
+            with self.assertRaisesRegex(ValueError, "X axis") as raised:
+                merge.merge_spectra(self.folder)
+        message = str(raised.exception)
+        self.assertIn(f"X axis mismatch in {actual_file}", message)
+        self.assertIn(f"Reference file: {reference_file}", message)
+        self.assertIn("Spectral data row: 3", message)
+        self.assertIn("Expected: 202 nm (CSV line 5)", message)
+        self.assertIn("Actual:   203 nm (CSV line 5)", message)
+        self.assertIn("Data rows: expected 3, actual 3", message)
         self.assertFalse((self.folder.parent / "instrument data-combined.xlsx").exists())
 
-    def test_exactly_one_water_reference_is_required(self):
-        (self.folder / "water.csv").rename(self.folder / "reference.csv")
-        with self.assertRaisesRegex(ValueError, "found 0"):
-            merge.find_spectral_files(self.folder)
-        self.write_spectrum("Water reference", [1, 2, 3])
-        self.assertEqual(merge.find_spectral_files(self.folder)[1].stem, "Water reference")
-        self.write_spectrum("water blank", [1, 2, 3])
-        with self.assertRaisesRegex(ValueError, "found 2"):
-            merge.find_spectral_files(self.folder)
+    def test_mismatch_line_numbers_include_blank_lines(self):
+        reference_file = self.folder / "sample.csv"
+        actual_file = self.folder / "other sample.csv"
+        actual_file.write_text(
+            "Instrument export\nXYDATA\n\n200,5,500\n \n201,8,500\n"
+            "203,11,500\n##### Extended Information\n",
+            encoding="latin-1",
+        )
+        with self.assertRaises(ValueError) as raised:
+            merge.validate_wavelength_axis(
+                merge.read_spectrum(reference_file), merge.read_spectrum(actual_file),
+                reference_file, actual_file,
+            )
+        self.assertIn("Expected: 202 nm (CSV line 5)", str(raised.exception))
+        self.assertIn("Actual:   203 nm (CSV line 7)", str(raised.exception))
+
+    def test_different_axis_lengths_report_the_first_missing_or_extra_row(self):
+        reference_file = self.folder / "sample.csv"
+        actual_file = self.folder / "other sample.csv"
+        for wavelengths, row, expected, actual in (
+            ((200, 201), 3, "202 nm (CSV line 5)",
+             "<end of spectral data> (CSV line 5)"),
+            ((200, 201, 202, 203), 4, "<end of spectral data> (CSV line 6)",
+             "203 nm (CSV line 6)"),
+        ):
+            with self.subTest(wavelengths=wavelengths):
+                self.write_spectrum("other sample", range(len(wavelengths)), wavelengths)
+                with self.assertRaises(ValueError) as raised:
+                    merge.validate_wavelength_axis(
+                        merge.read_spectrum(reference_file), merge.read_spectrum(actual_file),
+                        reference_file, actual_file,
+                    )
+                message = str(raised.exception)
+                self.assertIn(f"Spectral data row: {row}", message)
+                self.assertIn(f"Expected: {expected}", message)
+                self.assertIn(f"Actual:   {actual}", message)
+                self.assertIn(f"Data rows: expected 3, actual {len(wavelengths)}", message)
+
+    def test_equivalent_integer_and_decimal_wavelengths_are_accepted(self):
+        self.write_spectrum("other sample", [1, 2, 3], wavelengths=(200.0, 201.0, 202.0))
+        output = merge.merge_spectra(self.folder)
+        self.assertTrue(output.is_file())
+
+    def test_four_column_exports_keep_wavelength_cd_and_ht_in_correct_columns(self):
+        self.write_spectrum("sample", [5, 8, 11], extra_channel=0.25)
+        self.write_spectrum("other sample", [1, 2, 3], extra_channel=0.5)
+        frame = merge.read_spectrum(self.folder / "sample.csv")
+        self.assertEqual(frame["wavelength_nm"].tolist(), [200, 201, 202])
+        self.assertEqual(frame["cd_mdeg"].tolist(), [5, 8, 11])
+        self.assertEqual(frame["ht_v"].tolist(), [500, 500, 500])
+        self.assertEqual(frame.index.tolist(), [0, 1, 2])
+        output = merge.merge_spectra(self.folder)
+        raw = pd.read_excel(output, sheet_name="RAW")
+        self.assertEqual(raw["wavelength_nm"].tolist(), [200, 201, 202])
+        self.assertEqual(raw["sample_cd_mdeg"].tolist(), [5, 8, 11])
+        self.assertEqual(raw["other sample_cd_mdeg"].tolist(), [1, 2, 3])
+
+    def test_all_filenames_are_treated_as_samples(self):
+        self.write_spectrum("water", [1, 2, 3])
+        self.write_spectrum("Water blank", [2, 4, 6])
+        self.write_coefficients("sample\t2\nwater\t4\nWater blank\t2\n")
+        self.assertEqual(len(merge.find_spectral_files(self.folder)), 3)
+
+        output = merge.merge_spectra(self.folder)
+        summary = pd.read_excel(output, sheet_name="SUMMARY", header=None)
+        headers = summary.iloc[0].tolist()
+        for name, expected in (
+            ("sample", [2.5, 4, 5.5]),
+            ("water", [0.25, 0.5, 0.75]),
+            ("Water blank", [1, 2, 3]),
+        ):
+            with self.subTest(name=name):
+                columns = [index for index, header in enumerate(headers) if header == name]
+                self.assertEqual(len(columns), 2)
+                np.testing.assert_allclose(
+                    summary.iloc[1:, columns[-1]].to_numpy(dtype=float), expected
+                )
 
     def test_invalid_concentration_coefficients_are_rejected(self):
         for coefficient in ("0", "-1", "NaN", "inf", "-inf"):
