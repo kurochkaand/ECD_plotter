@@ -9,9 +9,13 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import matplotlib
 import numpy as np
 import pandas as pd
 from openpyxl import load_workbook
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 import merge
 import spectral_component_analysis as analysis
@@ -411,6 +415,67 @@ class MergeTests(unittest.TestCase):
         )
         self.addCleanup(workbook.close)
         self.assertEqual(workbook["CD_subtr"]["E2"].value, "=B2-$C2")
+
+    def test_plot_is_disabled_by_default(self):
+        with patch.object(merge, "plot_cd_spectra") as plot:
+            merge.merge_spectra(self.folder)
+        plot.assert_not_called()
+
+    def test_plot_displays_normalized_cd_in_acquisition_order(self):
+        self.write_spectrum("a later sample", [-2, 4, 12], time="19:00:00")
+        self.write_coefficients("sample\t2\na later sample\t4\n")
+        figures = []
+
+        def inspect_chart(*args, **kwargs):
+            figure = plt.gcf()
+            figures.append(figure)
+            self.assertEqual(len(figure.axes), 1)
+            axis = figure.axes[0]
+            self.assertEqual(axis.get_xlabel(), "Wavelength (nm)")
+            self.assertEqual(axis.get_ylabel(), "Normalized CD (mdeg)")
+            lines = axis.get_lines()
+            self.assertEqual([line.get_label() for line in lines], ["sample", "a later sample"])
+            np.testing.assert_allclose(lines[0].get_xdata(), [200, 201, 202])
+            np.testing.assert_allclose(lines[0].get_ydata(), [2.5, 4, 5.5])
+            np.testing.assert_allclose(lines[1].get_ydata(), [-0.5, 1, 3])
+            self.assertTrue((self.folder.parent / "instrument data-combined.xlsx").is_file())
+
+        with patch.object(plt, "show", side_effect=inspect_chart) as show:
+            merge.merge_spectra(self.folder, plot=True)
+        show.assert_called_once_with(block=True)
+        self.assertFalse(plt.fignum_exists(figures[0].number))
+
+    def test_subtraction_plot_matches_corrections_and_keeps_excel_formulas(self):
+        self.write_spectrum("H2O_reference", [1, 2, 3], time="19:00:00")
+        self.write_spectrum("later sample", [4, 6, 8], time="20:00:00")
+        self.write_coefficients("sample\t2\nH2O_reference\t3\nlater sample\t1\n")
+
+        def inspect_chart(*args, **kwargs):
+            axis = plt.gcf().axes[0]
+            self.assertIn("H2O_reference", axis.get_title())
+            lines = axis.get_lines()
+            self.assertEqual([line.get_label() for line in lines], ["sample", "later sample"])
+            np.testing.assert_allclose(lines[0].get_ydata(), [2, 3, 4])
+            np.testing.assert_allclose(lines[1].get_ydata(), [3, 4, 5])
+
+        with patch.object(plt, "show", side_effect=inspect_chart) as show:
+            output = merge.merge_spectra(self.folder, subtract="H2O", plot=True)
+        show.assert_called_once_with(block=True)
+        workbook = load_workbook(output, data_only=False)
+        self.addCleanup(workbook.close)
+        self.assertEqual(workbook["CD_subtr"]["F2"].value, "=(B2-$C2)/2.0")
+        self.assertEqual(workbook["CD_subtr"]["G2"].value, "=D2-$C2")
+
+    def test_cli_plot_option_runs_with_subtraction(self):
+        self.write_spectrum("H2O_reference", [1, 2, 3], time="19:00:00")
+        result = subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "merge.py"),
+             "--folder", str(self.folder), "--subtract", "H2O", "--plot"],
+            env={**os.environ, "MPLBACKEND": "Agg"},
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Saved ", result.stdout)
 
     def test_invalid_concentration_coefficients_are_rejected(self):
         for coefficient in ("0", "-1", "NaN", "inf", "-inf"):

@@ -20,6 +20,16 @@ py -3 -m venv .venv
 
 Alternatively, edit `DEFAULT_FOLDER` in `merge.py` and run it without `--folder`.
 
+Supported flags for `merge.py` (all optional):
+
+| Flag | Purpose | Default |
+| --- | --- | --- |
+| `--folder PATH` | Folder containing the CSV exports. Quote paths containing spaces. | `DEFAULT_FOLDER` configured in `merge.py`. |
+| `--refresh-ph` | Replace existing pH values with values from filenames, preserving concentration coefficients and pH values for filenames without pH. | Preserve existing pH values; infer missing values. |
+| `--subtract PREFIX` | Subtract the CD reference whose filename starts with `PREFIX`, ignoring case, using Excel formulas. Exactly one spectrum must match. | No reference subtraction. |
+| `--plot` | Display all corrected CD spectra together in one Matplotlib chart after saving the workbook. Applies concentration normalization and any requested reference subtraction. | No plot window. |
+| `-h`, `--help` | Display usage and supported flags, then exit. | Merge normally. |
+
 The script reads CSV files directly inside the selected folder, ordered by the
 acquisition date in cell B5 and time in cell B6, earliest first. Dates use `YY/MM/DD`
 (for example, `26/10/14` means October 14, 2026) or `YYYY/MM/DD`. Times can use
@@ -81,6 +91,19 @@ row. The raw `CD`, `HT`, and `Abs` sheets retain their original signals.
 Excel calculates the formulas when the workbook opens. Open and save the workbook
 in Excel before reading calculated subtraction values with Python or another tool
 that relies on stored formula results.
+
+Add `--plot` to display all corrected CD spectra on one chart, with wavelength in
+nm on the x-axis and normalized CD in mdeg on the y-axis. Curves and legend entries
+follow acquisition order. With `--subtract`, the chart shows the subtracted,
+concentration-normalized spectra and omits the reference itself. The plot uses the
+CSV values directly, so Excel does not need to calculate the workbook first.
+
+```powershell
+.\.venv\Scripts\python.exe merge.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14" --subtract "H2O" --plot
+```
+
+The workbook is saved before the plot window opens. Close the window to return to
+the terminal.
 
 All input wavelength axes must match the earliest acquired CSV. A mismatch
 reports the first differing data row, physical CSV line numbers, expected and

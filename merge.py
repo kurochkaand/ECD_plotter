@@ -288,8 +288,52 @@ def corrected_cd_columns(
     return corrected_columns
 
 
+def plot_cd_spectra(
+    wavelengths: pd.Series,
+    cd_data: dict[str, pd.Series],
+    coefficients: pd.Series,
+    subtraction_reference: str | None,
+) -> None:
+    """Display the corrected CD spectra together without reading Excel formulas."""
+    import matplotlib.pyplot as plt
+
+    sample_names = [name for name in cd_data if name != subtraction_reference]
+    if not sample_names:
+        raise ValueError("No sample spectra remain to plot after reference subtraction.")
+
+    figure, axis = plt.subplots(figsize=(14, 8))
+    try:
+        colors = plt.get_cmap("turbo")
+        for index, name in enumerate(sample_names):
+            signal = cd_data[name]
+            if subtraction_reference is not None:
+                signal = signal - cd_data[subtraction_reference]
+            signal = signal / coefficients[name]
+            axis.plot(
+                wavelengths,
+                signal,
+                label=name,
+                linewidth=1.3,
+                color=colors(index / max(len(sample_names) - 1, 1)),
+            )
+
+        title = "Concentration-normalized CD spectra"
+        if subtraction_reference is not None:
+            title += f"\nReference subtracted: {subtraction_reference}"
+        axis.set_title(title)
+        axis.set_xlabel("Wavelength (nm)")
+        axis.set_ylabel("Normalized CD (mdeg)")
+        axis.grid(alpha=0.25)
+        axis.legend(loc="upper left", bbox_to_anchor=(1.02, 1), fontsize=7)
+        figure.tight_layout()
+        plt.show(block=True)
+    finally:
+        plt.close(figure)
+
+
 def merge_spectra(
-    folder: Path, *, refresh_ph: bool = False, subtract: str | None = None
+    folder: Path, *, refresh_ph: bool = False, subtract: str | None = None,
+    plot: bool = False,
 ) -> Path:
     """Write CD, HT, Abs, and CD_subtr sheets on the instrument's wavelength axis."""
     files = find_spectral_files(folder)
@@ -338,6 +382,8 @@ def merge_spectra(
             writer.book.calculation = CalcProperties(
                 calcMode="auto", fullCalcOnLoad=True, forceFullCalc=True
             )
+    if plot:
+        plot_cd_spectra(channel_columns["CD"][0], cd_data, coefficients, subtraction_reference)
     return output_file
 
 
@@ -361,11 +407,17 @@ def main() -> int:
         metavar="PREFIX",
         help="Subtract the CD spectrum matching this filename prefix using Excel formulas.",
     )
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="Display all corrected CD spectra on one Matplotlib chart after saving.",
+    )
     args = parser.parse_args()
 
     try:
         output_file = merge_spectra(
-            args.folder.resolve(), refresh_ph=args.refresh_ph, subtract=args.subtract
+            args.folder.resolve(), refresh_ph=args.refresh_ph, subtract=args.subtract,
+            plot=args.plot,
         )
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
