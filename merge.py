@@ -2,16 +2,7 @@ import pandas as pd
 from io import StringIO
 from pathlib import Path
 
-folder = Path(
-    # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260720_PLGA-preliminary"
-    # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260721_PLGA-first-tiration/"
-    # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260721_PLGA-metals/"
-    # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260722-PLGA-pH3-methals/"
-    # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260722-PLGA-pH-titrat/"
-    # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260722-PDGA-pH-titrat/"
-    # "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260727-PLGA-pH8-methals/"
-    "/Users/andriikurochka/Documents/PGA_methals/K.Andrii/260729-PLGA-pH8-methals/"
-)
+folder = Path("X:/Cations_and_PGA/ECD-Szeged/K.Andrii/260730-PLGA-titration-Zn")
 
 def file_creation_time(file: Path) -> float:
     """Return the file creation time, with a fallback for non-macOS systems."""
@@ -23,7 +14,7 @@ files = sorted(
     folder.glob("*.csv"),
     key=lambda file: (file_creation_time(file), file.name.lower()),
 )
-water_files = [file for file in files if file.stem.lower() == "water"]
+water_files = [file for file in files if file.stem.lower().startswith("water")]
 
 if not files:
     raise FileNotFoundError(f"No CSV files found directly inside {folder}")
