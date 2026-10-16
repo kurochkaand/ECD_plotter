@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,7 +27,10 @@ class MergeTests(unittest.TestCase):
         self.folder.mkdir()
         self.write_spectrum("sample", [5, 8, 11])
 
-    def write_spectrum(self, name, cd, wavelengths=(200, 201, 202), extra_channel=None):
+    def write_spectrum(
+        self, name, cd, wavelengths=(200, 201, 202), extra_channel=None,
+        date="26/10/14", time="18:41:36",
+    ):
         rows = []
         for wavelength, signal in zip(wavelengths, cd):
             values = [wavelength, signal, 500]
@@ -34,7 +38,8 @@ class MergeTests(unittest.TestCase):
                 values.append(extra_channel)
             rows.append(",".join(map(str, values)) + "\n")
         (self.folder / f"{name}.csv").write_text(
-            "Instrument export\nXYDATA\n" + "".join(rows)
+            "TITLE,Instrument export\nDATA TYPE,\nORIGIN,JASCO\nOWNER,\n"
+            f"DATE,{date}\nTIME,{time}\nXYDATA\n" + "".join(rows)
             + "##### Extended Information\n",
             encoding="latin-1",
         )
@@ -71,6 +76,78 @@ class MergeTests(unittest.TestCase):
             "spectrum": ["sample"], "concentration_coefficient": [1.0], "Ph": [7.0],
         })
 
+    def test_workbook_and_existing_table_follow_acquisition_datetime(self):
+        self.write_spectrum("a_later", [4, 8, 12], date="26/10/15", time="00:00:00")
+        self.write_spectrum("z_earlier", [5, 10, 15], date="26/10/13", time="11:59:59 PM")
+        self.write_spectrum("morning", [3, 6, 9], time="6:41:36 AM")
+        table_file = self.folder / "concentration_table.txt"
+        table_file.write_text(
+            "spectrum\t\t\t\tconcentration_coefficient\tPh\n"
+            "a_later\t4\t6.5\nsample\t2\t7.2\n"
+            "z_earlier\t5\t8.1\nmorning\t3\t6.8\n",
+            encoding="utf-8",
+        )
+        expected_names = ["z_earlier", "morning", "sample", "a_later"]
+
+        output = merge.merge_spectra(self.folder)
+        raw = pd.read_excel(output, sheet_name="RAW")
+        summary = pd.read_excel(output, sheet_name="SUMMARY", header=None)
+        table = pd.read_csv(table_file, sep="\t")
+        self.assertEqual(raw.columns.tolist(), [
+            "wavelength_nm",
+            *(column for name in expected_names for column in (f"{name}_cd_mdeg", f"{name}_ht_v")),
+        ])
+        self.assertEqual(
+            summary.iloc[0].tolist(),
+            ["wavelength_nm", *expected_names, "zero", *expected_names],
+        )
+        self.assertEqual(table["spectrum"].tolist(), expected_names)
+        self.assertEqual(table["concentration_coefficient"].tolist(), [5, 3, 2, 4])
+        self.assertEqual(table["Ph"].tolist(), [8.1, 6.8, 7.2, 6.5])
+        np.testing.assert_allclose(
+            summary.iloc[1:, -4:].to_numpy(dtype=float),
+            [[1, 1, 2.5, 1], [2, 2, 4, 2], [3, 3, 5.5, 3]],
+        )
+
+    def test_new_concentration_table_follows_acquisition_datetime(self):
+        self.write_spectrum("z_earlier", [1, 2, 3], time="06:00:00")
+        merge.merge_spectra(self.folder)
+        table = pd.read_csv(self.folder / "concentration_table.txt", sep="\t")
+        self.assertEqual(table["spectrum"].tolist(), ["z_earlier", "sample"])
+        self.assertEqual(table["concentration_coefficient"].tolist(), [1.0, 1.0])
+
+    def test_equal_timestamps_use_filename_order(self):
+        self.write_spectrum("zzz", [1, 2, 3])
+        self.write_spectrum("Alpha", [1, 2, 3], time="6:41:36 PM")
+        files = merge.find_spectral_files(self.folder)
+        self.assertEqual([file.stem for file in files], ["Alpha", "sample", "zzz"])
+
+    def test_acquisition_datetime_supports_24_hour_and_am_pm_times(self):
+        for date, time, hour in (
+            ("26/10/14", "18:41:36", 18),
+            ("2026/10/14", "6:41:36 PM", 18),
+            ("26/10/14", "12:41:36 AM", 0),
+            ("26/10/14", "12:41:36 PM", 12),
+        ):
+            with self.subTest(date=date, time=time):
+                self.write_spectrum("sample", [1, 2, 3], date=date, time=time)
+                self.assertEqual(
+                    merge.read_acquisition_datetime(self.folder / "sample.csv"),
+                    datetime(2026, 10, 14, hour, 41, 36),
+                )
+
+    def test_invalid_acquisition_datetime_reports_file_and_cells(self):
+        file = self.folder / "sample.csv"
+        for date, time in (("", "18:41:36"), ("26/13/14", "18:41:36"), ("26/10/14", "25:00:00")):
+            with self.subTest(date=date, time=time):
+                self.write_spectrum("sample", [1, 2, 3], date=date, time=time)
+                with self.assertRaisesRegex(ValueError, "Invalid acquisition date/time") as raised:
+                    merge.find_spectral_files(self.folder)
+                message = str(raised.exception)
+                self.assertIn(str(file), message)
+                self.assertIn(f"B5 (CSV line 5): {date!r}", message)
+                self.assertIn(f"B6 (CSV line 6): {time!r}", message)
+
     def test_mismatched_wavelengths_do_not_write_workbook(self):
         self.write_spectrum("other sample", [5, 8, 11], wavelengths=(200, 201, 203))
         reference_file = self.folder / "sample.csv"
@@ -82,8 +159,8 @@ class MergeTests(unittest.TestCase):
         self.assertIn(f"X axis mismatch in {actual_file}", message)
         self.assertIn(f"Reference file: {reference_file}", message)
         self.assertIn("Spectral data row: 3", message)
-        self.assertIn("Expected: 202 nm (CSV line 5)", message)
-        self.assertIn("Actual:   203 nm (CSV line 5)", message)
+        self.assertIn("Expected: 202 nm (CSV line 10)", message)
+        self.assertIn("Actual:   203 nm (CSV line 10)", message)
         self.assertIn("Data rows: expected 3, actual 3", message)
         self.assertFalse((self.folder.parent / "instrument data-combined.xlsx").exists())
 
@@ -100,17 +177,17 @@ class MergeTests(unittest.TestCase):
                 merge.read_spectrum(reference_file), merge.read_spectrum(actual_file),
                 reference_file, actual_file,
             )
-        self.assertIn("Expected: 202 nm (CSV line 5)", str(raised.exception))
+        self.assertIn("Expected: 202 nm (CSV line 10)", str(raised.exception))
         self.assertIn("Actual:   203 nm (CSV line 7)", str(raised.exception))
 
     def test_different_axis_lengths_report_the_first_missing_or_extra_row(self):
         reference_file = self.folder / "sample.csv"
         actual_file = self.folder / "other sample.csv"
         for wavelengths, row, expected, actual in (
-            ((200, 201), 3, "202 nm (CSV line 5)",
-             "<end of spectral data> (CSV line 5)"),
-            ((200, 201, 202, 203), 4, "<end of spectral data> (CSV line 6)",
-             "203 nm (CSV line 6)"),
+            ((200, 201), 3, "202 nm (CSV line 10)",
+             "<end of spectral data> (CSV line 10)"),
+            ((200, 201, 202, 203), 4, "<end of spectral data> (CSV line 11)",
+             "203 nm (CSV line 11)"),
         ):
             with self.subTest(wavelengths=wavelengths):
                 self.write_spectrum("other sample", range(len(wavelengths)), wavelengths)
