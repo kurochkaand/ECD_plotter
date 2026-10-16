@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
 """
-Spectral component analysis for an Excel workbook.
+Spectral component analysis for an Excel workbook on Windows.
 
 Expected workbook layout
 ------------------------
@@ -25,8 +24,7 @@ Run using the path configured below:
     python spectral_component_analysis.py
 
 Optional command-line overrides:
-    python spectral_component_analysis.py --file data.xlsx --min-wavelength 250 \
-        --max-wavelength 700 --components 3 --no-show
+    python spectral_component_analysis.py --file data.xlsx --components 3 --no-show
 """
 
 from __future__ import annotations
@@ -49,12 +47,12 @@ from scipy.optimize import nnls
 # =============================================================================
 
 # Put the path to the Excel file here. An absolute path is recommended.
-EXCEL_PATH = Path(r"/Users/andriikurochka/Documents/PGA_methals/K.Andrii/corrected.xlsx")
+EXCEL_PATH = Path("corrected.xlsx")
 
 SHEET_NAME = "Sheet1"
 
 # Wavelength interval used for all calculations and plots, inclusive.
-MIN_WAVELENGTH = 190
+MIN_WAVELENGTH = 190.0
 MAX_WAVELENGTH = 260.0
 
 # Automatic selection method used when N_COMPONENTS is None.
@@ -137,31 +135,31 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--file",
         type=Path,
-        default=None,
+        default=EXCEL_PATH,
         help="Optional override for EXCEL_PATH configured in the script.",
     )
     parser.add_argument(
         "--min-wavelength",
         type=float,
-        default=None,
+        default=MIN_WAVELENGTH,
         help="Optional override for MIN_WAVELENGTH.",
     )
     parser.add_argument(
         "--max-wavelength",
         type=float,
-        default=None,
+        default=MAX_WAVELENGTH,
         help="Optional override for MAX_WAVELENGTH.",
     )
     parser.add_argument(
         "--components",
         type=int,
-        default=None,
+        default=N_COMPONENTS,
         help="Force the number of components instead of automatic selection.",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=None,
+        default=OUTPUT_DIRECTORY,
         help="Optional output-directory override.",
     )
     parser.add_argument(
@@ -222,29 +220,13 @@ def load_spectral_dataset(
         frame = frame.groupby(wavelength_name, as_index=False)[spectral_columns].mean()
 
     low, high = sorted((float(min_wavelength), float(max_wavelength)))
+    observed_min = float(frame[wavelength_name].min())
+    observed_max = float(frame[wavelength_name].max())
     frame = frame.loc[
         frame[wavelength_name].between(low, high, inclusive="both")
     ].copy()
 
     if frame.empty:
-        observed_min = float(pd.to_numeric(
-            pd.read_excel(
-                excel_path,
-                sheet_name=sheet_name,
-                usecols=[0],
-                engine="openpyxl",
-            ).iloc[:, 0],
-            errors="coerce",
-        ).min())
-        observed_max = float(pd.to_numeric(
-            pd.read_excel(
-                excel_path,
-                sheet_name=sheet_name,
-                usecols=[0],
-                engine="openpyxl",
-            ).iloc[:, 0],
-            errors="coerce",
-        ).max())
         raise ValueError(
             f"No wavelength rows fall inside {low:g}-{high:g} nm. "
             f"Observed workbook range is approximately {observed_min:g}-{observed_max:g} nm."
@@ -506,7 +488,7 @@ def perform_mcr_als(
     return best
 
 
-def save_or_show_figure(
+def save_figure(
     figure: plt.Figure,
     filename: str,
     output_directory: Path,
@@ -527,7 +509,7 @@ def plot_input_spectra(dataset: SpectralDataset, output_directory: Path) -> None
     ax.grid(alpha=0.25)
     if len(dataset.names) <= 15:
         ax.legend(fontsize=8, ncol=2)
-    save_or_show_figure(fig, "01_input_spectra.png", output_directory, SAVE_FIGURES)
+    save_figure(fig, "01_input_spectra.png", output_directory, SAVE_FIGURES)
 
 
 def plot_svd(svd_result: SVDResult, selected_components: int, output_directory: Path) -> None:
@@ -548,7 +530,7 @@ def plot_svd(svd_result: SVDResult, selected_components: int, output_directory: 
     ax.set_xticks(component_axis)
     ax.grid(alpha=0.25)
     ax.legend()
-    save_or_show_figure(fig, "02_singular_values.png", output_directory, SAVE_FIGURES)
+    save_figure(fig, "02_singular_values.png", output_directory, SAVE_FIGURES)
 
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.bar(component_axis, 100.0 * svd_result.explained_energy_ratio[:count], label="Individual")
@@ -567,7 +549,7 @@ def plot_svd(svd_result: SVDResult, selected_components: int, output_directory: 
     ax.set_ylim(0, 102)
     ax.grid(alpha=0.25)
     ax.legend()
-    save_or_show_figure(fig, "03_explained_energy.png", output_directory, SAVE_FIGURES)
+    save_figure(fig, "03_explained_energy.png", output_directory, SAVE_FIGURES)
 
 
 def plot_pca(
@@ -590,7 +572,7 @@ def plot_pca(
     ax.axhline(0.0, linewidth=0.8)
     ax.grid(alpha=0.25)
     ax.legend()
-    save_or_show_figure(fig, "04_pca_loadings.png", output_directory, SAVE_FIGURES)
+    save_figure(fig, "04_pca_loadings.png", output_directory, SAVE_FIGURES)
 
     if n_components >= 2:
         fig, ax = plt.subplots(figsize=(8, 6))
@@ -603,7 +585,7 @@ def plot_pca(
         ax.set_xlabel(f"PC1 score ({100 * pca.explained_variance_ratio[0]:.2f}%)")
         ax.set_ylabel(f"PC2 score ({100 * pca.explained_variance_ratio[1]:.2f}%)")
         ax.grid(alpha=0.25)
-        save_or_show_figure(fig, "05_pca_scores.png", output_directory, SAVE_FIGURES)
+        save_figure(fig, "05_pca_scores.png", output_directory, SAVE_FIGURES)
     else:
         fig, ax = plt.subplots(figsize=(9, 5))
         ax.plot(np.arange(1, len(dataset.names) + 1), pca.scores[:, 0], "o-")
@@ -613,7 +595,7 @@ def plot_pca(
         ax.set_xlabel("Spectrum")
         ax.set_ylabel("PC1 score")
         ax.grid(alpha=0.25)
-        save_or_show_figure(fig, "05_pca_scores.png", output_directory, SAVE_FIGURES)
+        save_figure(fig, "05_pca_scores.png", output_directory, SAVE_FIGURES)
 
     residual_rms = np.sqrt(np.mean(pca.residuals**2, axis=1))
     fig, ax = plt.subplots(figsize=(9, 5))
@@ -625,7 +607,7 @@ def plot_pca(
     ax.set_xlabel("Spectrum")
     ax.set_ylabel("Residual RMS")
     ax.grid(axis="y", alpha=0.25)
-    save_or_show_figure(fig, "06_pca_residuals.png", output_directory, SAVE_FIGURES)
+    save_figure(fig, "06_pca_residuals.png", output_directory, SAVE_FIGURES)
 
 
 def plot_mcr(
@@ -648,7 +630,7 @@ def plot_mcr(
     ax.set_ylabel("Relative component spectrum")
     ax.grid(alpha=0.25)
     ax.legend()
-    save_or_show_figure(fig, "07_mcr_component_spectra.png", output_directory, SAVE_FIGURES)
+    save_figure(fig, "07_mcr_component_spectra.png", output_directory, SAVE_FIGURES)
 
     fig, ax = plt.subplots(figsize=(10, 6))
     x = np.arange(1, len(dataset.names) + 1)
@@ -666,7 +648,7 @@ def plot_mcr(
     ax.set_ylabel("Relative contribution")
     ax.grid(alpha=0.25)
     ax.legend()
-    save_or_show_figure(fig, "08_mcr_contributions.png", output_directory, SAVE_FIGURES)
+    save_figure(fig, "08_mcr_contributions.png", output_directory, SAVE_FIGURES)
 
     # Overlay measured and reconstructed spectra. Solid = measured, dashed = fit.
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -687,7 +669,7 @@ def plot_mcr(
     ax.grid(alpha=0.25)
     if len(dataset.names) <= 15:
         ax.legend(fontsize=8, ncol=2)
-    save_or_show_figure(fig, "09_mcr_reconstruction.png", output_directory, SAVE_FIGURES)
+    save_figure(fig, "09_mcr_reconstruction.png", output_directory, SAVE_FIGURES)
 
 
 def export_results(
@@ -801,32 +783,24 @@ def print_summary(
 def main() -> int:
     args = parse_arguments()
 
-    excel_path = args.file if args.file is not None else EXCEL_PATH
-    min_wavelength = (
-        args.min_wavelength if args.min_wavelength is not None else MIN_WAVELENGTH
-    )
-    max_wavelength = (
-        args.max_wavelength if args.max_wavelength is not None else MAX_WAVELENGTH
-    )
-    forced_components = args.components if args.components is not None else N_COMPONENTS
-    output_directory = args.output if args.output is not None else OUTPUT_DIRECTORY
+    output_directory = args.output
     run_mcr = RUN_MCR_ALS and not args.no_mcr
     show_plots = SHOW_PLOTS and not args.no_show
 
     try:
         output_directory.mkdir(parents=True, exist_ok=True)
         dataset = load_spectral_dataset(
-            excel_path=excel_path,
+            excel_path=args.file,
             sheet_name=SHEET_NAME,
-            min_wavelength=min_wavelength,
-            max_wavelength=max_wavelength,
+            min_wavelength=args.min_wavelength,
+            max_wavelength=args.max_wavelength,
         )
 
         svd_result = analyze_singular_values(dataset.spectra)
         selected_components = choose_component_count(
             svd_result=svd_result,
             spectra_shape=dataset.spectra.shape,
-            forced_components=forced_components,
+            forced_components=args.components,
         )
         pca = perform_pca(dataset.spectra, selected_components)
 
