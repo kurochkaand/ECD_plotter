@@ -24,6 +24,18 @@ import spectral_component_analysis as analysis
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+def quadratic_window_fit(values, window):
+    """Independent least-squares oracle for sample-aligned smoothing."""
+    fitted = []
+    for row in range(len(values)):
+        start = min(max(row - window // 2, 0), len(values) - window)
+        offsets = np.arange(start, start + window, dtype=float) - row
+        design = np.column_stack([np.ones(window), offsets, offsets**2])
+        coefficients, *_ = np.linalg.lstsq(design, values[start:start + window], rcond=None)
+        fitted.append(coefficients[0])
+    return np.array(fitted)
+
+
 class MergeTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="ECD cleanup ")
@@ -476,6 +488,112 @@ class MergeTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Saved ", result.stdout)
+
+    def test_even_window_smoothing_preserves_quadratics_at_original_positions(self):
+        positions = np.arange(101, dtype=float)
+        signal = pd.Series(
+            0.005 * positions**2 + 0.3 * positions - 2,
+            index=np.arange(400, 501), name="quadratic CD",
+        )
+        original = signal.copy()
+        result = merge.smooth_cd_spectra({"quadratic": signal}, 50)["quadratic"]
+        np.testing.assert_allclose(result, original, rtol=1e-12, atol=1e-12)
+        self.assertEqual(result.name, signal.name)
+        self.assertTrue(result.index.equals(signal.index))
+        pd.testing.assert_series_equal(signal, original)
+
+    def test_smoothing_matches_known_five_point_impulse_response(self):
+        values = np.zeros(21)
+        values[10] = 1
+        result = merge.smooth_cd_spectra({"impulse": pd.Series(values)}, 5)["impulse"]
+        expected = np.zeros(21)
+        expected[8:13] = np.array([-3, 12, 17, 12, -3]) / 35
+        np.testing.assert_allclose(result, expected, atol=1e-14)
+
+    def test_fifty_point_smoothing_matches_independent_fits_including_edges(self):
+        values = np.random.default_rng(2026).normal(size=101)
+        result = merge.smooth_cd_spectra({"noise": pd.Series(values)}, 50)["noise"]
+        np.testing.assert_allclose(result, quadratic_window_fit(values, 50), atol=1e-12)
+
+    def test_smoothing_precedes_subtraction_in_workbook_and_plot(self):
+        positions = np.arange(71, dtype=float)
+        wavelengths = positions + 200
+        sample = np.sin(positions / 10) + 0.1 * (-1.0)**positions
+        reference = 0.1 * np.cos(positions / 8) + 0.05 * (-1.0)**positions
+        self.write_spectrum("sample", sample, wavelengths=wavelengths)
+        self.write_spectrum(
+            "H2O_reference", reference, wavelengths=wavelengths,
+            time="19:00:00", ht=650, absorbance=0.5,
+        )
+        self.write_coefficients("sample\t2\nH2O_reference\t3\n")
+        expected_sample = quadratic_window_fit(sample, 6)
+        expected_reference = quadratic_window_fit(reference, 6)
+
+        def inspect_chart(*args, **kwargs):
+            axis = plt.gcf().axes[0]
+            self.assertIn("6 points, polynomial order 2", axis.get_title())
+            lines = axis.get_lines()
+            self.assertEqual([line.get_label() for line in lines], ["sample"])
+            np.testing.assert_allclose(lines[0].get_xdata(), wavelengths)
+            np.testing.assert_allclose(
+                lines[0].get_ydata(), (expected_sample - expected_reference) / 2,
+                atol=1e-12,
+            )
+
+        with patch.object(plt, "show", side_effect=inspect_chart) as show:
+            output = merge.merge_spectra(self.folder, subtract="H2O", smooth=6, plot=True)
+        show.assert_called_once_with(block=True)
+        workbook = load_workbook(output, data_only=False)
+        self.addCleanup(workbook.close)
+        for sheet_name, column, expected in (
+            ("CD", 2, sample), ("CD", 3, reference),
+            ("CD_subtr", 2, expected_sample), ("CD_subtr", 3, expected_reference),
+        ):
+            actual = [workbook[sheet_name].cell(row, column).value for row in range(2, 73)]
+            np.testing.assert_allclose(actual, expected, atol=1e-12)
+        self.assertEqual(workbook["HT"]["C2"].value, 650)
+        self.assertEqual(workbook["Abs"]["C2"].value, 0.5)
+        for row in range(2, 73):
+            self.assertEqual(workbook["CD_subtr"].cell(row, 5).value, f"=(B{row}-$C{row})/2.0")
+
+    def test_cli_smooth_supports_default_fifty_and_an_explicit_window(self):
+        positions = np.arange(70, dtype=float)
+        wavelengths = positions + 200
+        values = np.sin(positions / 9) + 0.2 * (-1.0)**positions
+        self.write_spectrum("sample", values, wavelengths=wavelengths)
+        self.write_spectrum("H2O_reference", np.zeros(70), wavelengths=wavelengths, time="19:00:00")
+        for arguments, window in (([], 50), (["6"], 6)):
+            with self.subTest(window=window):
+                result = subprocess.run(
+                    [sys.executable, str(PROJECT_ROOT / "merge.py"),
+                     "--folder", str(self.folder), "--smooth", *arguments,
+                     "--subtract", "H2O"],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                workbook = load_workbook(
+                    self.folder.parent / "instrument data-combined.xlsx", data_only=False
+                )
+                try:
+                    actual = [workbook["CD_subtr"].cell(row, 2).value for row in range(2, 72)]
+                    np.testing.assert_allclose(actual, quadratic_window_fit(values, window), atol=1e-12)
+                    self.assertEqual(workbook["CD_subtr"]["E2"].value, "=B2-$C2")
+                finally:
+                    workbook.close()
+
+    def test_invalid_smoothing_windows_do_not_write_outputs(self):
+        for window in (-1, 0, 1, 2, 4, 1_000_000):
+            with self.subTest(window=window):
+                with self.assertRaisesRegex(ValueError, "--smooth window"):
+                    merge.merge_spectra(self.folder, smooth=window)
+                self.assertFalse((self.folder / "concentration_table.txt").exists())
+                self.assertFalse((self.folder.parent / "instrument data-combined.xlsx").exists())
+
+    def test_smoothing_rejects_non_numeric_or_non_finite_cd(self):
+        for value, expected in (("bad", "numeric"), (np.nan, "finite"), (np.inf, "finite")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, f"invalid.csv must be {expected}"):
+                    merge.smooth_cd_spectra({"invalid": pd.Series([1, value, 3])}, 3)
 
     def test_invalid_concentration_coefficients_are_rejected(self):
         for coefficient in ("0", "-1", "NaN", "inf", "-inf"):

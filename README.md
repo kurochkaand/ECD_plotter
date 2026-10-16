@@ -28,6 +28,7 @@ Supported flags for `merge.py` (all optional):
 | `--refresh-ph` | Replace existing pH values with values from filenames, preserving concentration coefficients and pH values for filenames without pH. | Preserve existing pH values; infer missing values. |
 | `--subtract PREFIX` | Subtract the CD reference whose filename starts with `PREFIX`, ignoring case, using Excel formulas. Exactly one spectrum must match. | No reference subtraction. |
 | `--plot` | Display all corrected CD spectra together in one Matplotlib chart after saving the workbook. Applies concentration normalization and any requested reference subtraction. | No plot window. |
+| `--smooth [POINTS]` | Smooth every CD spectrum, including the subtraction reference, before subtraction and concentration normalization. Savitzky-Golay, polynomial order 2, no padding. | No smoothing; `--smooth` alone uses 50 points. |
 | `-h`, `--help` | Display usage and supported flags, then exit. | Merge normally. |
 
 The script reads CSV files directly inside the selected folder, ordered by the
@@ -70,6 +71,10 @@ The workbook is saved beside the data folder as `<folder-name>-combined.xlsx`:
   sample CD calculated as `sample / concentration_coefficient`, or reference-
   subtracted CD formulas when `--subtract` is supplied.
 
+With `--smooth`, the input CD block before the zero separator contains the smoothed
+signals. Subtraction formulas reference these smoothed values. The `CD` sheet
+retains the untreated measurements; `HT` and `Abs` also retain their original values.
+
 Each channel sheet starts with `wavelength_nm`, followed by one column per spectrum
 named after the CSV filename without its extension. The `RAW` sheet is replaced
 by these three channel sheets. Only CD is concentration-normalized in `CD_subtr`.
@@ -104,6 +109,27 @@ CSV values directly, so Excel does not need to calculate the workbook first.
 
 The workbook is saved before the plot window opens. Close the window to return to
 the terminal.
+
+Use `--smooth 50` to apply Savitzky-Golay smoothing with a 50-point window and
+polynomial order 2. `--smooth` without a number also selects 50 points. The window
+must contain at least 3 points and cannot exceed the number of wavelength rows.
+Both even and odd windows are supported; 50 is used exactly, without rounding.
+
+The boundary condition is **None**: no artificial padding, reflection, or repeated
+edge values. Interior fits are evaluated at the original sample positions; an even
+50-point window uses 25 preceding and 24 following points. At the edges, a quadratic
+is fitted to the first or last full window of measured values and evaluated at each
+original position. This preserves the wavelength alignment and output row count.
+See [Origin's definition of None](https://docs.originlab.com/origin-help/smooth-dialog/)
+and [SciPy's Savitzky-Golay coefficient options](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.savgol_coeffs.html).
+
+Smoothing is applied separately to each sample and reference **before subtraction**,
+then concentration normalization is applied. The plot uses these same processed
+signals, while the Excel subtraction cells remain formulas.
+
+```powershell
+.\.venv\Scripts\python.exe merge.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14-Cd" --smooth 50 --subtract "H2O" --plot
+```
 
 All input wavelength axes must match the earliest acquired CSV. A mismatch
 reports the first differing data row, physical CSV line numbers, expected and

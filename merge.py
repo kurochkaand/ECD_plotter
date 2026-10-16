@@ -12,9 +12,11 @@ from itertools import islice
 from math import isfinite
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from openpyxl.utils import get_column_letter
 from openpyxl.workbook.properties import CalcProperties
+from scipy.signal import savgol_coeffs
 
 
 DEFAULT_FOLDER = Path(
@@ -288,11 +290,49 @@ def corrected_cd_columns(
     return corrected_columns
 
 
+def smooth_cd_spectra(
+    cd_data: dict[str, pd.Series], window_points: int
+) -> dict[str, pd.Series]:
+    """Apply quadratic Savitzky-Golay fits without padding or shifting samples."""
+    if window_points < 3:
+        raise ValueError("The --smooth window must contain at least 3 points for polynomial order 2.")
+    for name, signal in cd_data.items():
+        if window_points > len(signal):
+            raise ValueError(
+                f"The --smooth window of {window_points} points exceeds the "
+                f"{len(signal)} data points in {name}.csv."
+            )
+
+    left = window_points // 2
+    right = window_points - left - 1
+    weights = savgol_coeffs(window_points, polyorder=2, pos=left, use="dot")
+    window_positions = np.arange(window_points, dtype=float)
+    smoothed_data = {}
+    for name, signal in cd_data.items():
+        try:
+            values = signal.to_numpy(dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"CD values in {name}.csv must be numeric for smoothing.") from exc
+        if not np.isfinite(values).all():
+            raise ValueError(f"CD values in {name}.csv must be finite for smoothing.")
+
+        smoothed = np.empty_like(values)
+        smoothed[left:len(values) - right] = np.convolve(values, weights[::-1], mode="valid")
+        # Use only measured points at the edges, fitting the first/last window.
+        first_fit = np.polynomial.Polynomial.fit(window_positions, values[:window_points], 2)
+        last_fit = np.polynomial.Polynomial.fit(window_positions, values[-window_points:], 2)
+        smoothed[:left] = first_fit(window_positions[:left])
+        smoothed[-right:] = last_fit(window_positions[-right:])
+        smoothed_data[name] = pd.Series(smoothed, index=signal.index, name=signal.name)
+    return smoothed_data
+
+
 def plot_cd_spectra(
     wavelengths: pd.Series,
     cd_data: dict[str, pd.Series],
     coefficients: pd.Series,
     subtraction_reference: str | None,
+    *, smooth_window: int | None = None,
 ) -> None:
     """Display the corrected CD spectra together without reading Excel formulas."""
     import matplotlib.pyplot as plt
@@ -320,6 +360,8 @@ def plot_cd_spectra(
         title = "Concentration-normalized CD spectra"
         if subtraction_reference is not None:
             title += f"\nReference subtracted: {subtraction_reference}"
+        if smooth_window is not None:
+            title += f"\nSavitzky-Golay: {smooth_window} points, polynomial order 2"
         axis.set_title(title)
         axis.set_xlabel("Wavelength (nm)")
         axis.set_ylabel("Normalized CD (mdeg)")
@@ -333,7 +375,7 @@ def plot_cd_spectra(
 
 def merge_spectra(
     folder: Path, *, refresh_ph: bool = False, subtract: str | None = None,
-    plot: bool = False,
+    plot: bool = False, smooth: int | None = None,
 ) -> Path:
     """Write CD, HT, Abs, and CD_subtr sheets on the instrument's wavelength axis."""
     files = find_spectral_files(folder)
@@ -358,11 +400,13 @@ def merge_spectra(
 
     sample_names = list(cd_data)
     subtraction_reference = select_subtraction_reference(sample_names, subtract)
+    if smooth is not None:
+        cd_data = smooth_cd_spectra(cd_data, smooth)
     coefficients = load_concentration_coefficients(
         folder, sample_names, refresh_ph=refresh_ph
     )
 
-    # Keep raw CD before the zero separator and corrected CD after it.
+    # The input block is smoothed when requested; the CD sheet stays untreated.
     summary = pd.concat(
         [
             channel_columns["CD"][0],
@@ -383,7 +427,10 @@ def merge_spectra(
                 calcMode="auto", fullCalcOnLoad=True, forceFullCalc=True
             )
     if plot:
-        plot_cd_spectra(channel_columns["CD"][0], cd_data, coefficients, subtraction_reference)
+        plot_cd_spectra(
+            channel_columns["CD"][0], cd_data, coefficients, subtraction_reference,
+            smooth_window=smooth,
+        )
     return output_file
 
 
@@ -412,12 +459,22 @@ def main() -> int:
         action="store_true",
         help="Display all corrected CD spectra on one Matplotlib chart after saving.",
     )
+    parser.add_argument(
+        "--smooth",
+        type=int,
+        nargs="?",
+        const=50,
+        default=None,
+        metavar="POINTS",
+        help="Smooth CD before subtraction using Savitzky-Golay (order 2, no padding). "
+             "Defaults to 50 points when supplied without a value.",
+    )
     args = parser.parse_args()
 
     try:
         output_file = merge_spectra(
             args.folder.resolve(), refresh_ph=args.refresh_ph, subtract=args.subtract,
-            plot=args.plot,
+            plot=args.plot, smooth=args.smooth,
         )
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
