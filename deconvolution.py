@@ -1,4 +1,4 @@
-"""Convert corrected CD spectra to MRE for future SESCA analysis."""
+"""Convert corrected CD spectra to MRE and estimate secondary structure with SESCA."""
 
 from __future__ import annotations
 
@@ -18,6 +18,10 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 from openpyxl.worksheet.worksheet import Worksheet
+
+from sesca_integration import (
+    FIT_SHEET, RESULTS_SHEET, SescaOptions, fit_spectra, write_results,
+)
 
 
 SOURCE_SHEET = "CD_subtr"
@@ -110,7 +114,8 @@ def read_corrected_cd(sheet: Worksheet) -> tuple[list[str], list[list[float | No
 
 
 def convert_to_mre(
-    folder: Path, *, path_in_mm: float, num_of_aa: int, concentration_in_M: float
+    folder: Path, *, path_in_mm: float, num_of_aa: int, concentration_in_M: float,
+    sesca_options: SescaOptions | None = None,
 ) -> Path:
     """Append numeric MRE spectra using the concentration targeted by merge.py."""
     for name, value in (("path_in_mm", path_in_mm), ("concentration_in_M", concentration_in_M)):
@@ -143,8 +148,10 @@ def convert_to_mre(
                 raise ValueError(f"Nonfinite MRE result at wavelength {wavelength:g} nm.")
             mre_rows.append([wavelength, *converted])
 
+        analysis = fit_spectra(names, mre_rows, sesca_options) if sesca_options is not None else None
+
         # Reruns replace only these output sheets and retain all measured channels.
-        for title in (MRE_SHEET, PARAMETERS_SHEET):
+        for title in (MRE_SHEET, PARAMETERS_SHEET, RESULTS_SHEET, FIT_SHEET):
             if title in workbook.sheetnames:
                 del workbook[title]
         output = workbook.create_sheet(MRE_SHEET)
@@ -174,9 +181,14 @@ def convert_to_mre(
             ("MRE_units", MRE_UNITS),
             ("conversion", "CD_mdeg / (path_in_mm * concentration_in_M * num_of_aa)"),
             ("formula_source", FORMULA_SOURCE),
-            ("secondary_structure_analysis", "Pending SESCA integration"),
         ):
             parameters.append(row)
+        if analysis is None:
+            parameters.append(("secondary_structure_analysis", "Not run (MRE only)"))
+        else:
+            for row in analysis.parameters:
+                parameters.append(row)
+            write_results(workbook, analysis)
         parameters.column_dimensions["A"].width = 30
         parameters.column_dimensions["B"].width = 85
         for cell in parameters[1]:
@@ -199,7 +211,7 @@ def convert_to_mre(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Convert corrected CD (mdeg) in a combined workbook to mean residue ellipticity."
+        description="Convert corrected CD to MRE and estimate secondary structure with SESCA."
     )
     parser.add_argument("--folder", type=Path, required=True, help="Data folder passed to merge.py.")
     parser.add_argument("--path-in-mm", type=float, required=True, help="Cell path length in millimeters.")
@@ -209,18 +221,39 @@ def main() -> int:
         help="Peptide/protein concentration in millimolar before dilution correction "
              "(the concentration targeted by merge.py's relative coefficients).",
     )
+    parser.add_argument("--mre-only", action="store_true", help="Convert to MRE without running SESCA.")
+    parser.add_argument(
+        "--sesca-dir", type=Path,
+        help="SESCA root containing scripts/ and libs/. Default: SESCA_HOME or .sesca/SESCA_v097.",
+    )
+    parser.add_argument(
+        "--sesca-basis", default="DS-dT",
+        help="Standalone SESCA basis name or path to a basis file (default: DS-dT).",
+    )
+    parser.add_argument("--sesca-min-nm", type=float, default=190.0, help="Fit range lower bound (default: 190 nm).")
+    parser.add_argument("--sesca-max-nm", type=float, default=250.0, help="Fit range upper bound (default: 250 nm).")
+    parser.add_argument("--sesca-repeats", type=int, default=10, help="Number of fit restarts (default: 10).")
+    parser.add_argument("--sesca-seed", type=int, default=0, help="Random seed for repeatable fits (default: 0).")
     args = parser.parse_args()
 
     try:
+        sesca_options = None if args.mre_only else SescaOptions(
+            directory=args.sesca_dir, basis=args.sesca_basis,
+            min_nm=args.sesca_min_nm, max_nm=args.sesca_max_nm,
+            repeats=args.sesca_repeats, seed=args.sesca_seed,
+        )
         output_file = convert_to_mre(
             args.folder, path_in_mm=args.path_in_mm, num_of_aa=args.num_of_aa,
             concentration_in_M=args.concentration_in_mM / 1000.0,
+            sesca_options=sesca_options,
         )
-    except (OSError, ValueError, BadZipFile) as exc:
+    except (OSError, ValueError, RuntimeError, BadZipFile) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
     print(f"Saved {MRE_SHEET} ({MRE_UNITS}) and {PARAMETERS_SHEET} in {output_file}")
+    if sesca_options is not None:
+        print(f"Saved {RESULTS_SHEET} and {FIT_SHEET}. Check status and note for any skipped spectra.")
     return 0
 
 

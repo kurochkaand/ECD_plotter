@@ -178,7 +178,7 @@ class DeconvolutionTests(unittest.TestCase):
         return subprocess.run(
             [sys.executable, str(PROJECT_ROOT / "deconvolution.py"),
              "--folder", str(folder or self.folder), "--path-in-mm", "1",
-             "--num-of-aa", "20", "--concentration-in-mM", "0.1"],
+             "--num-of-aa", "20", "--concentration-in-mM", "0.1", "--mre-only"],
             capture_output=True, text=True, check=False,
         )
 

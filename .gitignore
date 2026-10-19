@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local SESCA distribution (downloaded separately from the upstream project)
+.sesca/

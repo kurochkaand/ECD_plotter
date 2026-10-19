@@ -178,11 +178,30 @@ reports the first differing data row, physical CSV line numbers, expected and
 actual wavelengths, reference filename, and row counts. Rerunning replaces the
 output workbook. Close it in Excel before rerunning.
 
-## Prepare mean residue ellipticity for deconvolution
+## Convert to MRE and estimate secondary structure with SESCA
 
 ```powershell
 .\.venv\Scripts\python.exe deconvolution.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14-Cd" --path-in-mm 1 --num-of-aa 20 --concentration-in-mM 0.1
 ```
+
+This command converts the corrected spectra to MRE and runs the official
+`SESCA_deconv.py` engine for each sample. To install SESCA in the default local
+directory `.sesca/SESCA_v097`, download and extract the
+[official SESCA 0.97 distribution](https://www.mpinat.mpg.de/4787098/SESCA_v097.zip):
+
+```powershell
+New-Item -ItemType Directory -Path .sesca -Force | Out-Null
+Invoke-WebRequest -Uri "https://www.mpinat.mpg.de/4787098/SESCA_v097.zip" -OutFile ".sesca/SESCA_v097.zip"
+Expand-Archive -LiteralPath ".sesca/SESCA_v097.zip" -DestinationPath ".sesca"
+```
+
+The distribution is kept outside version control and retains its upstream GPLv3
+license. The adapter uses the deconvolution module directly with the NumPy and
+SciPy already listed in `requirements.txt`; SESCA's setup script, PDB files, DSSP,
+and DISICL are not needed for this workflow. To use another installation, pass
+`--sesca-dir "X:\Tools\SESCA_v097"` or set the `SESCA_HOME` environment variable to
+its root directory. An explicit flag takes precedence over the environment, which
+takes precedence over the local `.sesca/SESCA_v097` directory.
 
 Replace the example residue count and concentration with your sample's values.
 All four flags are required. Path length and concentration must be finite and
@@ -222,12 +241,63 @@ Results are saved in the same combined workbook:
 
 - `MRE`: wavelength in nm followed by one numeric MRE column per corrected spectrum.
 - `MRE_parameters`: path length, residue count, concentration in M, units, formula,
-  and source sheet for reproducibility.
+  source sheet, SESCA settings, random seed, and engine/basis file hashes.
+- `SESCA_results`: one row per spectrum with structure fractions, intensity scaling
+  factor, RMSD in kMRE, normalized RMSD, fitted wavelength range, and point count.
+  Fractions are stored as numbers from 0 to 1 and displayed as percentages.
+- `SESCA_fit`: one row per fitted wavelength and spectrum, containing the original
+  observed MRE, scaled observed MRE, fitted MRE, and residual MRE
+  (`scaled_observed_MRE - fitted_MRE`).
 
-Rerunning replaces these two output sheets. Close the workbook in Excel before
+The default basis is **DS-dT**, whose three classes are `Alpha`, `Beta`, and `Coil`.
+Class names always come from the selected SESCA basis. `Coil` includes structures
+outside the alpha and beta classes; it is not a separate measurement of disorder.
+Fitting defaults to **190–250 nm** and uses only valid measured wavelengths matching
+the basis grid (normally 1 nm). Values at other wavelengths remain in `MRE` but are
+not fitted. Wavelengths within `0.000001 nm` of a grid point count as matches.
+Excluded points remain absent from fitting, with no interpolation across gaps.
+Each sample must have at least `max(10, 2 * number_of_classes)` matched points,
+at least 20 nm coverage, and an independent basis matrix. Blank, all-zero, or
+insufficient spectra get `status=skipped` with a reason and blank fractions.
+
+The adapter uses SESCA's default nonnegative fit followed by coefficient
+normalization, which allows intensity rescaling. The scaling factor multiplies
+the observed spectrum before comparison with the normalized fitted spectrum.
+For example, `scaling_factor=0.5` means the fitted structure matches half the
+measured intensity. Examine this factor alongside RMSD when assessing the fit.
+Each fit uses 10 random starts and up to 5000 optimization iterations per start;
+seed `0` makes reruns reproducible within the same software environment.
+The input passed to SESCA is **kMRE = MRE / 1000**, matching its basis library units.
+
+Optional controls:
+
+| Flag | Purpose | Default |
+| --- | --- | --- |
+| `--mre-only` | Convert without SESCA; remove any old SESCA output sheets. | Run SESCA. |
+| `--sesca-dir PATH` | SESCA root containing `scripts/` and `libs/`. | `SESCA_HOME`, then local installation. |
+| `--sesca-basis NAME_OR_PATH` | Standalone basis name or basis file path. | `DS-dT`. |
+| `--sesca-min-nm VALUE` | Lower fit wavelength bound. | `190`. |
+| `--sesca-max-nm VALUE` | Upper fit wavelength bound. | `250`. |
+| `--sesca-repeats INTEGER` | Number of fit restarts. | `10`. |
+| `--sesca-seed INTEGER` | Random seed between 0 and 4294967295. | `0`. |
+
+For example, select the six-class `DS5-4` basis or a different fit range:
+
+```powershell
+.\.venv\Scripts\python.exe deconvolution.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14-Cd" --path-in-mm 1 --num-of-aa 20 --concentration-in-mM 0.1 --sesca-basis DS5-4 --sesca-min-nm 195 --sesca-max-nm 250
+```
+
+Use standalone basis sets for this workflow. Mixed backbone/side-chain sets need
+sequence-dependent correction spectra and are not configured automatically here.
+These outputs are SESCA deconvolution estimates; Bayesian estimation and
+class-specific uncertainty intervals are not part of this command.
+See the [SESCA project and publications](https://www.mpinat.mpg.de/sesca).
+
+Rerunning replaces these four output sheets. A fitting or save error leaves the
+original workbook intact. Close the workbook in Excel before
 running. Rerunning `merge.py` recreates the entire workbook, so run
-`deconvolution.py` again afterward. SESCA secondary structure analysis will be
-added later; this command currently prepares MRE spectra only.
+`deconvolution.py` again afterward. To retain the earlier conversion-only behavior,
+add `--mre-only`.
 
 ## Analyze spectral components
 
