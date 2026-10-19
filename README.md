@@ -26,8 +26,8 @@ Supported flags for `merge.py` (all optional):
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
 | `--folder PATH`          | Folder containing the CSV exports. Quote paths containing spaces.                                                                                                         | `DEFAULT_FOLDER` configured in `merge.py`.          |
 | `--refresh-ph`           | Replace existing pH values with values from filenames, preserving concentration coefficients and pH values for filenames without pH.                                      | Preserve existing pH values; infer missing values.  |
-| `--subtract PREFIX`      | Subtract the CD reference whose filename starts with `PREFIX`, ignoring case, using Excel formulas. Exactly one spectrum must match.                                      | No reference subtraction.                           |
-| `--plot`                 | Display all corrected CD spectra together in one Matplotlib chart after saving the workbook. Applies concentration normalization and any requested reference subtraction. | No plot window.                                     |
+| `--subtract PREFIX`      | Subtract the CD and Abs reference whose filename starts with `PREFIX`, ignoring case, using Excel formulas. Exactly one spectrum must match.                              | No reference subtraction.                           |
+| `--plot`                 | Display corrected CD and Abs spectra in separate panels after saving the workbook. Applies concentration normalization and any requested reference subtraction.         | No plot window.                                     |
 | `--smooth [POINTS]`      | Smooth every CD spectrum, including the subtraction reference, before subtraction and concentration normalization. Savitzky-Golay, polynomial order 2, no padding.        | No smoothing; `--smooth` alone uses 50 points.      |
 | `--ht-threshold [VALUE]` | Blank CD values where that spectrum's HT exceeds `VALUE` V, before smoothing, subtraction, and normalization.                                                             | No HT filtering; `--ht-threshold` alone uses 500 V. |
 | `-h`, `--help`           | Display usage and supported flags, then exit.                                                                                                                             | Merge normally.                                     |
@@ -48,6 +48,8 @@ the filename: `pH7.43` gives `7.43`, and `pH7.9` gives `7.9`. A space after `pH`
 is accepted. Files without pH in the name, such as `H2O_1mm_185-300nm_4sc_20nm-1.csv`,
 use the default `7.0`.
 Edit the tab-separated table and rerun the command to apply the coefficients.
+Extra tabs may be used to align columns in the header and data rows; blank lines
+are ignored. Each run writes the table back with one tab between columns.
 Each run sorts the table rows into acquisition order, keeping existing coefficients
 and `Ph` values attached to their spectrum names. All workbook sheets use this
 same spectrum order for their columns.
@@ -71,6 +73,11 @@ The workbook is saved beside the data folder as `<folder-name>-combined.xlsx`:
 - `CD_subtr`: wavelength, raw sample CD, a zero separator, then normalized
   sample CD calculated as `sample / concentration_coefficient`, or reference-
   subtracted CD formulas when `--subtract` is supplied.
+- `Abs_subtr`: the same layout for absorbance, calculated as
+  `sample_abs / concentration_coefficient`, or Excel formulas for
+  `(sample_abs - reference_abs) / concentration_coefficient` with `--subtract`.
+  The reference and coefficients are the same as for CD. Its measured absorbance
+  remains in the input block; the reference is omitted from the corrected block.
 
 With `--smooth`, the input CD block before the zero separator contains the smoothed
 signals. Subtraction formulas reference these smoothed values. The `CD` sheet
@@ -79,7 +86,10 @@ retain their original values.
 
 Each channel sheet starts with `wavelength_nm`, followed by one column per spectrum
 named after the CSV filename without its extension. The `RAW` sheet is replaced
-by these three channel sheets. Only CD is concentration-normalized in `CD_subtr`.
+by these three channel sheets. CD and absorbance are concentration-normalized in
+`CD_subtr` and `Abs_subtr`, respectively. Smoothing and HT filtering apply to CD;
+absorbance correction uses the original absorbance measurements. Missing sample
+or reference absorbance values leave the corresponding corrected cells blank.
 
 To subtract a reference spectrum, provide its filename prefix:
 
@@ -100,11 +110,14 @@ Excel calculates the formulas when the workbook opens. Open and save the workboo
 in Excel before reading calculated subtraction values with Python or another tool
 that relies on stored formula results.
 
-Add `--plot` to display all corrected CD spectra on one chart, with wavelength in
-nm on the x-axis and normalized CD in mdeg on the y-axis. Curves and legend entries
-follow acquisition order. With `--subtract`, the chart shows the subtracted,
-concentration-normalized spectra and omits the reference itself. The plot uses the
+Add `--plot` to display corrected CD and absorbance spectra in two panels sharing
+the wavelength axis in nm. The y-axes show normalized CD in mdeg and normalized
+absorbance in AU. Curves and legend entries follow acquisition order, with the same
+sample colors in both panels. With `--subtract`, both panels show the subtracted,
+concentration-normalized spectra and omit the reference itself. The plot uses the
 CSV values directly, so Excel does not need to calculate the workbook first.
+Missing absorbance values produce gaps; spectra with no corrected absorbance
+values are omitted from that panel. If none are available, only CD is plotted.
 
 ```powershell
 .\.venv\Scripts\python.exe merge.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14" --subtract "H2O" --plot

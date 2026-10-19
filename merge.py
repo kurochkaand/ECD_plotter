@@ -1,4 +1,4 @@
-"""Merge Windows instrument CSV exports and normalize CD spectra."""
+"""Merge Windows instrument CSV exports and normalize CD and absorbance spectra."""
 
 from __future__ import annotations
 
@@ -182,9 +182,18 @@ def load_concentration_coefficients(
                 )
             concentration_table = pd.read_csv(
                 stream,
-                sep="\t",
+                # Repeated tabs are visual alignment, not additional columns.
+                sep=r"\t+",
+                engine="python",
                 header=None,
                 names=CONCENTRATION_COLUMNS[:column_count],
+                dtype={"spectrum": str},
+            )
+        # Pandas can silently use extra fields as an index instead of rejecting them.
+        if not isinstance(concentration_table.index, pd.RangeIndex):
+            raise ValueError(
+                f"{concentration_file} must have {column_count} tab-separated columns "
+                "per row; found extra values"
             )
         concentration_table["spectrum"] = (
             concentration_table["spectrum"].astype(str).str.strip()
@@ -260,28 +269,28 @@ def select_subtraction_reference(sample_names: list[str], prefix: str | None) ->
     return matches[0]
 
 
-def corrected_cd_columns(
-    cd_data: dict[str, pd.Series],
+def corrected_spectral_columns(
+    spectral_data: dict[str, pd.Series],
     coefficients: pd.Series,
     subtraction_reference: str | None,
 ) -> list[pd.Series]:
-    """Normalize CD, using Excel formulas when a reference must be subtracted."""
+    """Normalize a channel, using Excel formulas when subtracting a reference."""
     if subtraction_reference is None:
         return [
             (signal / coefficients[name]).rename(name)
-            for name, signal in cd_data.items()
+            for name, signal in spectral_data.items()
         ]
 
-    reference_column = get_column_letter(list(cd_data).index(subtraction_reference) + 2)
+    reference_column = get_column_letter(list(spectral_data).index(subtraction_reference) + 2)
     corrected_columns = []
-    for column, (name, signal) in enumerate(cd_data.items(), start=2):
+    for column, (name, signal) in enumerate(spectral_data.items(), start=2):
         if name == subtraction_reference:
             continue
         source_column = get_column_letter(column)
         coefficient = float(coefficients[name])
         formulas = []
         for position, row in enumerate(range(2, len(signal) + 2)):
-            if pd.isna(signal.iloc[position]) or pd.isna(cd_data[subtraction_reference].iloc[position]):
+            if pd.isna(signal.iloc[position]) or pd.isna(spectral_data[subtraction_reference].iloc[position]):
                 formulas.append(None)
                 continue
             difference = f"{source_column}{row}-${reference_column}{row}"
@@ -336,48 +345,67 @@ def smooth_cd_spectra(
     return smoothed_data
 
 
-def plot_cd_spectra(
+def plot_corrected_spectra(
     wavelengths: pd.Series,
-    cd_data: dict[str, pd.Series],
+    spectral_channels: dict[str, dict[str, pd.Series]],
     coefficients: pd.Series,
     subtraction_reference: str | None,
     *, smooth_window: int | None = None, ht_threshold: float | None = None,
 ) -> None:
-    """Display the corrected CD spectra together without reading Excel formulas."""
+    """Display corrected CD and absorbance panels without reading Excel formulas."""
     import matplotlib.pyplot as plt
 
-    sample_names = [name for name in cd_data if name != subtraction_reference]
+    sample_names = [name for name in spectral_channels["CD"] if name != subtraction_reference]
     if not sample_names:
         raise ValueError("No sample spectra remain to plot after reference subtraction.")
 
-    figure, axis = plt.subplots(figsize=(14, 8))
+    corrected_channels = {}
+    for channel_name, spectral_data in spectral_channels.items():
+        corrected = {}
+        for name in sample_names:
+            signal = spectral_data[name]
+            if subtraction_reference is not None:
+                signal = signal - spectral_data[subtraction_reference]
+            corrected[name] = signal / coefficients[name]
+        # Older CSV exports have no absorbance. Only plot available Abs curves.
+        if channel_name == "Abs":
+            corrected = {name: signal for name, signal in corrected.items() if signal.notna().any()}
+            if not corrected:
+                continue
+        corrected_channels[channel_name] = corrected
+
+    figure, axes = plt.subplots(
+        len(corrected_channels), 1, figsize=(14, 6 * len(corrected_channels)),
+        sharex=True, squeeze=False,
+    )
     try:
         colors = plt.get_cmap("turbo")
-        for index, name in enumerate(sample_names):
-            signal = cd_data[name]
-            if subtraction_reference is not None:
-                signal = signal - cd_data[subtraction_reference]
-            signal = signal / coefficients[name]
-            axis.plot(
-                wavelengths,
-                signal,
-                label=name,
-                linewidth=1.3,
-                color=colors(index / max(len(sample_names) - 1, 1)),
-            )
+        for axis, (channel_name, corrected) in zip(axes[:, 0], corrected_channels.items()):
+            for index, name in enumerate(sample_names):
+                if name not in corrected:
+                    continue
+                axis.plot(
+                    wavelengths,
+                    corrected[name],
+                    label=name,
+                    linewidth=1.3,
+                    color=colors(index / max(len(sample_names) - 1, 1)),
+                )
 
-        title = "Concentration-normalized CD spectra"
-        if subtraction_reference is not None:
-            title += f"\nReference subtracted: {subtraction_reference}"
-        if smooth_window is not None:
-            title += f"\nSavitzky-Golay: {smooth_window} points, polynomial order 2"
-        if ht_threshold is not None:
-            title += f"\nHT cutoff: {ht_threshold:g} V"
-        axis.set_title(title)
-        axis.set_xlabel("Wavelength (nm)")
-        axis.set_ylabel("Normalized CD (mdeg)")
-        axis.grid(alpha=0.25)
-        axis.legend(loc="upper left", bbox_to_anchor=(1.02, 1), fontsize=7)
+            label = "CD" if channel_name == "CD" else "absorbance"
+            title = f"Concentration-normalized {label} spectra"
+            if subtraction_reference is not None:
+                title += f"\nReference subtracted: {subtraction_reference}"
+            if channel_name == "CD":
+                if smooth_window is not None:
+                    title += f"\nSavitzky-Golay: {smooth_window} points, polynomial order 2"
+                if ht_threshold is not None:
+                    title += f"\nHT cutoff: {ht_threshold:g} V"
+            axis.set_title(title)
+            axis.set_xlabel("Wavelength (nm)")
+            axis.set_ylabel(f"Normalized {label} ({'mdeg' if channel_name == 'CD' else 'AU'})")
+            axis.grid(alpha=0.25)
+            axis.legend(loc="upper left", bbox_to_anchor=(1.02, 1), fontsize=7)
         figure.tight_layout()
         plt.show(block=True)
     finally:
@@ -388,7 +416,7 @@ def merge_spectra(
     folder: Path, *, refresh_ph: bool = False, subtract: str | None = None,
     plot: bool = False, smooth: int | None = None, ht_threshold: float | None = None,
 ) -> Path:
-    """Write CD, HT, Abs, and CD_subtr sheets on the instrument's wavelength axis."""
+    """Write measured channels and corrected CD/Abs sheets on the wavelength axis."""
     if ht_threshold is not None and (not isfinite(ht_threshold) or ht_threshold < 0):
         raise ValueError("The --ht-threshold value must be finite and greater than or equal to zero.")
     files = find_spectral_files(folder)
@@ -397,6 +425,7 @@ def merge_spectra(
         sheet_name: [] for sheet_name in CHANNEL_SHEETS
     }
     cd_data: dict[str, pd.Series] = {}
+    abs_data: dict[str, pd.Series] = {}
 
     for file in files:
         frame = read_spectrum(file)
@@ -419,6 +448,7 @@ def merge_spectra(
         for sheet_name, column_name in CHANNEL_SHEETS.items():
             channel_columns[sheet_name].append(frame[column_name].rename(file.stem))
         cd_data[file.stem] = frame["cd_mdeg"]
+        abs_data[file.stem] = frame["absorbance"]
 
     sample_names = list(cd_data)
     subtraction_reference = select_subtraction_reference(sample_names, subtract)
@@ -428,29 +458,34 @@ def merge_spectra(
         folder, sample_names, refresh_ph=refresh_ph
     )
 
-    # The input block includes optional smoothing; the CD sheet includes only HT filtering.
-    summary = pd.concat(
-        [
-            channel_columns["CD"][0],
-            *(cd_data[name].rename(name) for name in sample_names),
-            pd.Series(0, index=channel_columns["CD"][0].index, name="zero"),
-            *corrected_cd_columns(cd_data, coefficients, subtraction_reference),
-        ],
-        axis=1,
-    )
+    # CD inputs include optional smoothing; Abs inputs retain the measured values.
+    spectral_channels = {"CD": cd_data, "Abs": abs_data}
+    summaries = {}
+    for channel_name, spectral_data in spectral_channels.items():
+        wavelengths = channel_columns[channel_name][0]
+        summaries[channel_name] = pd.concat(
+            [
+                wavelengths,
+                *(spectral_data[name].rename(name) for name in sample_names),
+                pd.Series(0, index=wavelengths.index, name="zero"),
+                *corrected_spectral_columns(spectral_data, coefficients, subtraction_reference),
+            ],
+            axis=1,
+        )
 
     output_file = folder.parent / f"{folder.name}-combined.xlsx"
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
         for sheet_name, columns in channel_columns.items():
             pd.concat(columns, axis=1).to_excel(writer, sheet_name=sheet_name, index=False)
-        summary.to_excel(writer, sheet_name="CD_subtr", index=False)
+        for channel_name, summary in summaries.items():
+            summary.to_excel(writer, sheet_name=f"{channel_name}_subtr", index=False)
         if subtraction_reference is not None:
             writer.book.calculation = CalcProperties(
                 calcMode="auto", fullCalcOnLoad=True, forceFullCalc=True
             )
     if plot:
-        plot_cd_spectra(
-            channel_columns["CD"][0], cd_data, coefficients, subtraction_reference,
+        plot_corrected_spectra(
+            channel_columns["CD"][0], spectral_channels, coefficients, subtraction_reference,
             smooth_window=smooth, ht_threshold=ht_threshold,
         )
     return output_file
@@ -458,7 +493,7 @@ def merge_spectra(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Merge instrument CSV files and normalize CD spectra on Windows."
+        description="Merge instrument CSV files and normalize CD and absorbance spectra on Windows."
     )
     parser.add_argument(
         "--folder",
@@ -474,12 +509,12 @@ def main() -> int:
     parser.add_argument(
         "--subtract",
         metavar="PREFIX",
-        help="Subtract the CD spectrum matching this filename prefix using Excel formulas.",
+        help="Subtract the CD and absorbance reference matching this filename prefix using Excel formulas.",
     )
     parser.add_argument(
         "--plot",
         action="store_true",
-        help="Display all corrected CD spectra on one Matplotlib chart after saving.",
+        help="Display corrected CD and absorbance spectra in separate panels after saving.",
     )
     parser.add_argument(
         "--smooth",
