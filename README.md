@@ -12,6 +12,12 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
+## My latest usecase
+
+```powershell
+.\.venv\Scripts\python.exe merge.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14-Cd" --subtract "H2O" --plot --smooth 50 --ht-threshold 500
+```
+
 ## Merge instrument exports
 
 ```powershell
@@ -22,15 +28,15 @@ Alternatively, edit `DEFAULT_FOLDER` in `merge.py` and run it without `--folder`
 
 Supported flags for `merge.py` (all optional):
 
-| Flag                     | Purpose                                                                                                                                                                   | Default                                             |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| `--folder PATH`          | Folder containing the CSV exports. Quote paths containing spaces.                                                                                                         | `DEFAULT_FOLDER` configured in `merge.py`.          |
-| `--refresh-ph`           | Replace existing pH values with values from filenames, preserving concentration coefficients and pH values for filenames without pH.                                      | Preserve existing pH values; infer missing values.  |
-| `--subtract PREFIX`      | Subtract the CD and Abs reference whose filename starts with `PREFIX`, ignoring case, using Excel formulas. Exactly one spectrum must match.                              | No reference subtraction.                           |
-| `--plot`                 | Display corrected CD and Abs spectra in separate panels after saving the workbook. Applies concentration normalization and any requested reference subtraction.         | No plot window.                                     |
-| `--smooth [POINTS]`      | Smooth every CD spectrum, including the subtraction reference, before subtraction and concentration normalization. Savitzky-Golay, polynomial order 2, no padding.        | No smoothing; `--smooth` alone uses 50 points.      |
-| `--ht-threshold [VALUE]` | Blank CD values where that spectrum's HT exceeds `VALUE` V, before smoothing, subtraction, and normalization.                                                             | No HT filtering; `--ht-threshold` alone uses 500 V. |
-| `-h`, `--help`           | Display usage and supported flags, then exit.                                                                                                                             | Merge normally.                                     |
+| Flag                     | Purpose                                                                                                                                                            | Default                                             |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- |
+| `--folder PATH`          | Folder containing the CSV exports. Quote paths containing spaces.                                                                                                  | `DEFAULT_FOLDER` configured in `merge.py`.          |
+| `--refresh-ph`           | Replace existing pH values with values from filenames, preserving concentration coefficients and pH values for filenames without pH.                               | Preserve existing pH values; infer missing values.  |
+| `--subtract PREFIX`      | Subtract the CD and Abs reference whose filename starts with `PREFIX`, ignoring case, using Excel formulas. Exactly one spectrum must match.                       | No reference subtraction.                           |
+| `--plot`                 | Display corrected CD and Abs spectra in separate panels after saving the workbook. Applies concentration normalization and any requested reference subtraction.    | No plot window.                                     |
+| `--smooth [POINTS]`      | Smooth every CD spectrum, including the subtraction reference, before subtraction and concentration normalization. Savitzky-Golay, polynomial order 2, no padding. | No smoothing; `--smooth` alone uses 50 points.      |
+| `--ht-threshold [VALUE]` | Blank CD values where that spectrum's HT exceeds `VALUE` V, before smoothing, subtraction, and normalization.                                                      | No HT filtering; `--ht-threshold` alone uses 500 V. |
+| `-h`, `--help`           | Display usage and supported flags, then exit.                                                                                                                      | Merge normally.                                     |
 
 The script reads CSV files directly inside the selected folder, ordered by the
 acquisition date in cell B5 and time in cell B6, earliest first. Dates use `YY/MM/DD`
