@@ -252,12 +252,19 @@ class SescaTests(unittest.TestCase):
                 "DATE,26/10/14\nTIME,18:41:36\nXYDATA\n" + rows
                 + "##### Extended Information\n", encoding="latin-1",
             )
+        table_file = folder / "concentration_table.txt"
+        table_file.write_text(
+            "spectrum\tconcentration_coefficient\tPh\tshort name\n"
+            f"{names[0]}\t1\t7\tCustom first\n{names[1]}\t1\t7\tCustom second\n",
+            encoding="utf-8",
+        )
+        original_table = table_file.read_bytes()
         output = merge.merge_spectra(folder, subtract="H2O")
 
         def inspect_chart(*args, **kwargs):
             self.assertEqual(
                 [tick.get_text() for tick in plt.gcf().axes[0].get_yticklabels()],
-                ["first", "second"],
+                ["Custom first", "Custom second"],
             )
 
         with patch.object(plt, "show", side_effect=inspect_chart) as show:
@@ -269,13 +276,14 @@ class SescaTests(unittest.TestCase):
         workbook = load_workbook(output, data_only=True)
         try:
             self.assertEqual([cell.value for cell in workbook["MRE"][1]],
-                             ["wavelength_nm", "first", "second"])
+                             ["wavelength_nm", "Custom first", "Custom second"])
             self.assertEqual([row[0] for row in list(workbook["SESCA_results"].values)[1:]],
-                             ["first", "second"])
+                             ["Custom first", "Custom second"])
             self.assertEqual({row[0] for row in list(workbook["SESCA_fit"].values)[1:]},
-                             {"first", "second"})
+                             {"Custom first", "Custom second"})
         finally:
             workbook.close()
+        self.assertEqual(table_file.read_bytes(), original_table)
 
     def test_all_skipped_results_do_not_open_an_empty_plot(self):
         output = self.root / "skipped.xlsx"

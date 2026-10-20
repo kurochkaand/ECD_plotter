@@ -101,6 +101,28 @@ class DeconvolutionTests(unittest.TestCase):
             ("wavelength_nm", "peptide"), (200, None), (201, None), (202, 7000),
         ])
 
+    def test_table_edits_reach_deconvolution_after_rerunning_merge(self):
+        self.write_spectrum("H2O", [2, 4, 6])
+        self.write_spectrum("removed", [10, 12, 14])
+        output = merge.merge_spectra(self.folder, subtract="H2O")
+        deconvolution.convert_to_mre(self.folder, **self.parameters)
+
+        table_file = self.folder / "concentration_table.txt"
+        table_file.write_text(
+            "spectrum\t\tconcentration_coefficient\tPh\tshort name\n"
+            "peptide\t\t2\t7\tKept sample\n", encoding="utf-8",
+        )
+        original = table_file.read_bytes()
+        merge.merge_spectra(self.folder, subtract="H2O")
+        deconvolution.convert_to_mre(self.folder, **self.parameters)
+
+        workbook = self.open_workbook(output)
+        self.assertEqual(list(workbook["MRE"].values), [
+            ("wavelength_nm", "Kept sample"),
+            (200, -5500), (201, -1000), (202, 3500),
+        ])
+        self.assertEqual(table_file.read_bytes(), original)
+
     def test_rerun_replaces_outputs_with_updated_parameters(self):
         output = merge.merge_spectra(self.folder)
         deconvolution.convert_to_mre(self.folder, **self.parameters)

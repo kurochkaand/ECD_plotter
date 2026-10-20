@@ -32,14 +32,13 @@ Supported flags for `merge.py` (all optional):
 | Flag                     | Purpose                                                                                                                                                            | Default                                             |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- |
 | `--folder PATH`          | Folder containing the CSV exports. Quote paths containing spaces.                                                                                                  | `DEFAULT_FOLDER` configured in `merge.py`.          |
-| `--refresh-ph`           | Replace existing pH values with values from filenames, preserving concentration coefficients and pH values for filenames without pH.                               | Preserve existing pH values; infer missing values.  |
 | `--subtract PREFIX`      | Subtract the CD and Abs reference whose filename starts with `PREFIX`, ignoring case, using Excel formulas. Exactly one spectrum must match.                       | No reference subtraction.                           |
 | `--plot`                 | Display corrected CD and Abs spectra in separate panels after saving the workbook. Applies concentration normalization and any requested reference subtraction.    | No plot window.                                     |
 | `--smooth [POINTS]`      | Smooth every CD spectrum, including the subtraction reference, before subtraction and concentration normalization. Savitzky-Golay, polynomial order 2, no padding. | No smoothing; `--smooth` alone uses 50 points.      |
 | `--ht-threshold [VALUE]` | Blank CD values where that spectrum's HT exceeds `VALUE` V, before smoothing, subtraction, and normalization.                                                      | No HT filtering; `--ht-threshold` alone uses 500 V. |
 | `-h`, `--help`           | Display usage and supported flags, then exit.                                                                                                                      | Merge normally.                                     |
 
-The script reads CSV files directly inside the selected folder, ordered by the
+The script reads selected CSV files directly inside the data folder, ordered by the
 acquisition date in cell B5 and time in cell B6, earliest first. Dates use `YY/MM/DD`
 (for example, `26/10/14` means October 14, 2026) or `YYYY/MM/DD`. Times can use
 `18:41:36` or `6:41:36 PM`. Filename order breaks ties. Missing or invalid timestamps
@@ -47,39 +46,44 @@ produce an error identifying the file and cell. Each file must contain an
 `XYDATA` block with wavelength, CD, HT, and Abs columns followed by
 `##### Extended Information`. Older three-column exports are also accepted, with
 blank Abs values.
-Every CSV is treated as a sample.
+When no concentration table exists, every CSV is treated as a sample except the
+reference selected by `--subtract`.
 
 On the first run, the script creates `concentration_table.txt` in the data folder
 with a concentration coefficient of `1.0` for each sample. `Ph` is extracted from
 the filename: `pH7.43` gives `7.43`, and `pH7.9` gives `7.9`. A space after `pH`
 is accepted. Files without pH in the name, such as `H2O_1mm_185-300nm_4sc_20nm-1.csv`,
 use the default `7.0`.
-Edit the tab-separated table and rerun the command to apply the coefficients.
-Extra tabs may be used to align columns in the header and data rows; blank lines
-are ignored. Each run writes the table back with one tab between columns.
-Each run sorts the table rows into acquisition order, keeping existing coefficients
-and `Ph` values attached to their spectrum names. All workbook sheets use this
-same spectrum order for their columns.
-The table also includes a `short name` column, regenerated on every merge by
-removing the longest common prefix and suffix from the filename stems and
+The table is the source of truth for sample selection, coefficients, pH, and
+short names. Once it exists, `merge.py` reads it without rewriting it, preserving
+your tabs, blank lines, row order, and other formatting exactly. Extra tabs may
+be used to align columns in the header and data rows; blank lines are ignored.
+Edit the table and rerun `merge.py` to apply your changes, then rerun
+`deconvolution.py` if needed. Workbook columns and plots still follow acquisition
+time, regardless of the order of rows in your table.
+
+Delete a sample's row to exclude its CSV from every workbook sheet, plot, and
+subsequent deconvolution. New or other unlisted CSVs are ignored without reading
+their timestamps or spectral data. Add their rows manually to include them.
+Table entries must identify existing CSVs by their full filename stem, without
+`.csv`. At least one sample must remain selected. To regenerate defaults for all
+current CSVs, delete `concentration_table.txt` and rerun `merge.py`.
+
+The table also includes a `short name` column. Initial defaults are generated by
+removing the longest common prefix and suffix from the sample filename stems and
 trimming surrounding spaces, underscores, and hyphens. For example,
 `peptide_pH7.43_1mm` and `peptide_pH5.77_1mm` become `7.43` and `5.77`.
-The reference selected by `--subtract` is excluded from this comparison and
-keeps its full filename stem. A single remaining sample keeps its full stem;
+The reference selected by `--subtract` has no row in a newly created table and
+keeps its full filename stem in the workbook inputs. It is loaded separately,
+only for subtraction; an existing reference row in an older table is ignored.
+A single remaining sample keeps its full stem;
 full stems are also retained if shortening would create an empty or duplicate
-label or a reserved workbook header (`zero` or `wavelength_nm`). Existing
-two- and three-column tables are upgraded automatically, preserving coefficients
-and pH values. Full filenames remain in the `spectrum` column to identify inputs.
-Missing `Ph` columns or blank values in existing tables are populated the same way.
-To replace existing pH values with those from the filenames while keeping your
-concentration coefficients, add `--refresh-ph`:
-
-```powershell
-.\.venv\Scripts\python.exe merge.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14" --refresh-ph
-```
-
-Values for filenames without pH are preserved when refreshing. Coefficients must be
-finite and greater than zero. `Ph` is retained as metadata and is not used in
+label or a reserved workbook header (`zero` or `wavelength_nm`). You can edit
+short names freely, provided they remain unique and do not conflict with reserved
+headers or the reference's filename stem. Existing two- and three-column tables
+remain supported: missing short names and pH values use inferred defaults in
+memory, without adding columns or filling cells in the file. Coefficients must
+be finite and greater than zero. `Ph` is retained as metadata and is not used in
 the correction.
 
 The workbook is saved beside the data folder as `<folder-name>-combined.xlsx`:
@@ -231,7 +235,7 @@ already applied by `merge.py`. Concentration coefficients are not applied again.
 When preparing the combined workbook, use `merge.py --subtract PREFIX` if buffer
 subtraction is needed. Only the corrected sample columns are converted; the
 subtracted reference is omitted. Without subtraction, all normalized spectra,
-including any buffer present as a sample, are converted.
+including any buffer listed as a sample in the concentration table, are converted.
 
 Mean residue ellipticity (MRE), in `deg cm^2 dmol^-1` per residue, is calculated as:
 

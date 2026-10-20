@@ -102,6 +102,59 @@ class MergeTests(unittest.TestCase):
             "short name": ["sample"],
         })
 
+    def test_new_table_omits_reference_and_deleting_table_recreates_defaults(self):
+        self.write_spectrum("H2O_reference", [1, 2, 3])
+        merge.merge_spectra(self.folder, subtract="H2O")
+        table_file = self.folder / "concentration_table.txt"
+        self.assertEqual(pd.read_csv(table_file, sep="\t")["spectrum"].tolist(), ["sample"])
+        original = table_file.read_bytes()
+
+        self.write_spectrum("new sample", [4, 6, 8], time="19:00:00")
+        output = merge.merge_spectra(self.folder, subtract="H2O")
+        self.assertEqual(pd.read_excel(output, sheet_name="CD").columns.tolist(),
+                         ["wavelength_nm", "H2O_reference", "sample"])
+        self.assertEqual(table_file.read_bytes(), original)
+
+        table_file.unlink()
+        merge.merge_spectra(self.folder, subtract="H2O")
+        table = pd.read_csv(table_file, sep="\t")
+        self.assertEqual(table["spectrum"].tolist(), ["sample", "new sample"])
+        self.assertEqual(table["concentration_coefficient"].tolist(), [1, 1])
+
+    def test_edited_table_controls_all_sheets_and_plots_without_reading_excluded_csvs(self):
+        self.write_spectrum("removed", [100, 200, 300])
+        merge.merge_spectra(self.folder)
+        table_file = self.folder / "concentration_table.txt"
+        original = (
+            "\ufeffspectrum\t\tconcentration_coefficient\t\tPh\t\tshort name\t\r\n"
+            "sample\t\t2\t\t6.8\t\tMy label\t\r\n\r\n"
+        ).encode("utf-8")
+        table_file.write_bytes(original)
+        # Neither an excluded old spectrum nor a new CSV needs valid metadata/data.
+        for name in ("removed", "new spectrum"):
+            (self.folder / f"{name}.csv").write_text("ignored malformed CSV", encoding="utf-8")
+
+        def inspect_plot(*args, **kwargs):
+            for axis in plt.gcf().axes:
+                self.assertEqual([line.get_label() for line in axis.lines], ["My label"])
+            np.testing.assert_allclose(plt.gcf().axes[0].lines[0].get_ydata(), [2.5, 4, 5.5])
+
+        with patch.object(plt, "show", side_effect=inspect_plot), \
+                patch.object(merge, "read_spectrum", wraps=merge.read_spectrum) as read:
+            output = merge.merge_spectra(self.folder, plot=True, smooth=3, ht_threshold=500)
+        self.assertEqual([call.args[0].stem for call in read.call_args_list], ["sample"])
+        workbook = load_workbook(output)
+        try:
+            for sheet in ("CD", "HT", "Abs"):
+                self.assertEqual([cell.value for cell in workbook[sheet][1]],
+                                 ["wavelength_nm", "My label"])
+            for sheet in ("CD_subtr", "Abs_subtr"):
+                self.assertEqual([cell.value for cell in workbook[sheet][1]],
+                                 ["wavelength_nm", "My label", "zero", "My label"])
+        finally:
+            workbook.close()
+        self.assertEqual(table_file.read_bytes(), original)
+
     def test_short_names_remove_common_affixes_and_keep_unique_nonempty_labels(self):
         for names, expected in (
             (["run_first_export", "run_second_export"], ["first", "second"]),
@@ -117,6 +170,9 @@ class MergeTests(unittest.TestCase):
             with self.subTest(names=names):
                 labels = merge.determine_short_names(names)
                 self.assertEqual([labels[name] for name in names], expected)
+        names = ["run_A_export", "run_B_export"]
+        self.assertEqual(merge.determine_short_names(names, subtraction_reference="A"),
+                         dict(zip(names, names)))
 
     def test_short_names_ignore_subtraction_reference_in_table_workbook_and_plot(self):
         first = "peptide_pH7.43_1mm_185-300nm_4sc_20nm-1"
@@ -131,6 +187,7 @@ class MergeTests(unittest.TestCase):
             f"{second}\t4\t6.8\n{reference}\t1\t7\n{first}\t2\t6.5\n",
             encoding="utf-8",
         )
+        contents = table_file.read_bytes()
 
         def inspect_plot(*args, **kwargs):
             for axis in plt.gcf().axes:
@@ -150,18 +207,17 @@ class MergeTests(unittest.TestCase):
                 self.assertEqual(workbook[sheet]["F2"].value, "=(B2-$D2)/2.0")
         finally:
             workbook.close()
-        table = pd.read_csv(table_file, sep="\t", dtype={"short name": str})
-        self.assertEqual(table["spectrum"].tolist(), [first, second, reference])
-        self.assertEqual(table["short name"].tolist(), ["7.43", "5.77", reference])
-        self.assertEqual(table["concentration_coefficient"].tolist(), [2, 4, 1])
-        self.assertEqual(table["Ph"].tolist(), [6.5, 6.8, 7.0])
-        # A subsequent merge reads the new four-column table and keeps the labels.
-        merge.merge_spectra(self.folder, subtract="H2O")
-        pd.testing.assert_frame_equal(
-            pd.read_csv(table_file, sep="\t", dtype={"short name": str}), table,
+        table = merge.load_concentration_table(
+            self.folder, [first, second, reference], subtraction_reference=reference,
         )
+        self.assertEqual(table.index.tolist(), [first, second])
+        self.assertEqual(table["short name"].tolist(), ["7.43", "5.77"])
+        self.assertEqual(table["concentration_coefficient"].tolist(), [2, 4])
+        self.assertEqual(table["Ph"].astype(float).tolist(), [6.5, 6.8])
+        merge.merge_spectra(self.folder, subtract="H2O")
+        self.assertEqual(table_file.read_bytes(), contents)
 
-    def test_four_column_table_regenerates_short_names_and_fills_missing_ph(self):
+    def test_four_column_table_preserves_short_names_and_only_infers_missing_ph_in_memory(self):
         names = ["peptide_pH7.43_export", "peptide_pH5.77_export"]
         for aligned in (False, True):
             with self.subTest(aligned=aligned):
@@ -173,11 +229,12 @@ class MergeTests(unittest.TestCase):
                     + f"{names[0]}\t2\t\told label\n",
                     encoding="utf-8",
                 )
-                merge.load_concentration_coefficients(self.folder, names)
-                table = pd.read_csv(table_file, sep="\t", dtype={"short name": str})
-                self.assertEqual(table["short name"].tolist(), ["7.43", "5.77"])
-                self.assertEqual(table["Ph"].tolist(), [7.43, 6.5])
+                contents = table_file.read_bytes()
+                table = merge.load_concentration_table(self.folder, names)
+                self.assertEqual(table["short name"].tolist(), ["old label", "outdated"])
+                self.assertEqual(table["Ph"].astype(float).tolist(), [7.43, 6.5])
                 self.assertEqual(table["concentration_coefficient"].tolist(), [2, 3])
+                self.assertEqual(table_file.read_bytes(), contents)
 
     def test_ph_is_extracted_from_filename_tokens(self):
         for name, expected in (
@@ -215,12 +272,13 @@ class MergeTests(unittest.TestCase):
             with self.subTest(contents=contents):
                 table_file = self.folder / "concentration_table.txt"
                 table_file.write_text(contents, encoding="utf-8")
-                merge.load_concentration_coefficients(self.folder, ["sample_pH5.77"])
-                table = pd.read_csv(table_file, sep="\t")
+                original = table_file.read_bytes()
+                table = merge.load_concentration_table(self.folder, ["sample_pH5.77"])
                 self.assertEqual(table["Ph"].tolist(), [5.77])
                 self.assertEqual(table["concentration_coefficient"].tolist(), [2])
+                self.assertEqual(table_file.read_bytes(), original)
 
-    def test_existing_ph_is_preserved_unless_refresh_is_requested(self):
+    def test_existing_ph_is_preserved(self):
         table_file = self.folder / "concentration_table.txt"
         table_file.write_text(
             "spectrum\tconcentration_coefficient\tPh\n"
@@ -228,14 +286,11 @@ class MergeTests(unittest.TestCase):
             encoding="utf-8",
         )
         names = ["sample_pH7.43", "H2O_1mm"]
-        merge.load_concentration_coefficients(self.folder, names)
-        table = pd.read_csv(table_file, sep="\t")
-        self.assertEqual(table["Ph"].tolist(), [6.8, 6.5])
-
-        merge.load_concentration_coefficients(self.folder, names, refresh_ph=True)
-        table = pd.read_csv(table_file, sep="\t")
-        self.assertEqual(table["Ph"].tolist(), [7.43, 6.5])
+        original = table_file.read_bytes()
+        table = merge.load_concentration_table(self.folder, names)
+        self.assertEqual(table["Ph"].astype(float).tolist(), [6.8, 6.5])
         self.assertEqual(table["concentration_coefficient"].tolist(), [2, 3])
+        self.assertEqual(table_file.read_bytes(), original)
 
     def test_concentration_table_accepts_alignment_tabs(self):
         names = ["H2O reference", "sample_pH5.77"]
@@ -269,11 +324,12 @@ class MergeTests(unittest.TestCase):
             with self.subTest(contents=contents):
                 table_file = self.folder / "concentration_table.txt"
                 table_file.write_text(contents, encoding="utf-8-sig")
-                coefficients = merge.load_concentration_coefficients(self.folder, names)
-                self.assertEqual(coefficients.to_dict(), dict(zip(names, [3, 2])))
-                table = pd.read_csv(table_file, sep="\t")
-                self.assertEqual(table["spectrum"].tolist(), names)
-                self.assertEqual(table["Ph"].tolist(), expected_ph)
+                original = table_file.read_bytes()
+                table = merge.load_concentration_table(self.folder, names)
+                self.assertEqual(table["concentration_coefficient"].to_dict(), dict(zip(names, [3, 2])))
+                self.assertEqual(table.index.tolist(), names)
+                self.assertEqual(table["Ph"].astype(float).tolist(), expected_ph)
+                self.assertEqual(table_file.read_bytes(), original)
 
     def test_duplicate_spectra_with_alignment_tabs_report_names(self):
         self.write_coefficients("sample\t\t\t1\nsample\t\t2\n")
@@ -291,26 +347,15 @@ class MergeTests(unittest.TestCase):
             merge.load_concentration_coefficients(self.folder, ["sample"])
         self.assertEqual(table_file.read_text(encoding="utf-8"), contents)
 
-    def test_cli_refreshes_ph_and_preserves_concentration_coefficients(self):
-        self.write_spectrum("peptide_pH5.77", [4, 8, 12], time="19:00:00")
-        table_file = self.folder / "concentration_table.txt"
-        table_file.write_text(
-            "spectrum\tconcentration_coefficient\tPh\n"
-            "sample\t2\t6.5\npeptide_pH5.77\t4\t7.0\n",
-            encoding="utf-8",
-        )
+    def test_cli_no_longer_offers_refresh_ph(self):
         result = subprocess.run(
-            [sys.executable, str(PROJECT_ROOT / "merge.py"),
-             "--folder", str(self.folder), "--refresh-ph"],
+            [sys.executable, str(PROJECT_ROOT / "merge.py"), "--help"],
             capture_output=True, text=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        table = pd.read_csv(table_file, sep="\t")
-        self.assertEqual(table["spectrum"].tolist(), ["sample", "peptide_pH5.77"])
-        self.assertEqual(table["Ph"].tolist(), [6.5, 5.77])
-        self.assertEqual(table["concentration_coefficient"].tolist(), [2, 4])
+        self.assertNotIn("--refresh-ph", result.stdout)
 
-    def test_workbook_and_existing_table_follow_acquisition_datetime(self):
+    def test_workbook_follows_acquisition_datetime_without_reordering_existing_table(self):
         self.write_spectrum("a_later", [4, 8, 12], date="26/10/15", time="00:00:00")
         self.write_spectrum("z_earlier", [5, 10, 15], date="26/10/13", time="11:59:59 PM")
         self.write_spectrum("morning", [3, 6, 9], time="6:41:36 AM")
@@ -321,6 +366,7 @@ class MergeTests(unittest.TestCase):
             "z_earlier\t5\t8.1\nmorning\t3\t6.8\n",
             encoding="utf-8",
         )
+        original = table_file.read_bytes()
         expected_names = ["z_earlier", "morning", "sample", "a_later"]
 
         output = merge.merge_spectra(self.folder)
@@ -329,14 +375,11 @@ class MergeTests(unittest.TestCase):
                 channel = pd.read_excel(workbook, sheet_name=sheet_name)
                 self.assertEqual(channel.columns.tolist(), ["wavelength_nm", *expected_names])
         summary = pd.read_excel(output, sheet_name="CD_subtr", header=None)
-        table = pd.read_csv(table_file, sep="\t")
         self.assertEqual(
             summary.iloc[0].tolist(),
             ["wavelength_nm", *expected_names, "zero", *expected_names],
         )
-        self.assertEqual(table["spectrum"].tolist(), expected_names)
-        self.assertEqual(table["concentration_coefficient"].tolist(), [5, 3, 2, 4])
-        self.assertEqual(table["Ph"].tolist(), [8.1, 6.8, 7.2, 6.5])
+        self.assertEqual(table_file.read_bytes(), original)
         np.testing.assert_allclose(
             summary.iloc[1:, -4:].to_numpy(dtype=float),
             [[1, 1, 2.5, 1], [2, 2, 4, 2], [3, 3, 5.5, 3]],
@@ -584,7 +627,7 @@ class MergeTests(unittest.TestCase):
     def test_subtraction_writes_formulas_for_each_wavelength_and_preserves_raw_data(self):
         self.write_spectrum("H2O_reference", [1, 2, 3], time="19:00:00")
         self.write_spectrum("later sample", [4, 6, 8], time="20:00:00")
-        self.write_coefficients("sample\t2\nH2O_reference\t3\nlater sample\t1\n")
+        self.write_coefficients("sample\t2\nlater sample\t1\n")
         output = merge.merge_spectra(self.folder, subtract="h2o")
         workbook = load_workbook(output, data_only=False)
         self.addCleanup(workbook.close)
@@ -963,12 +1006,33 @@ class MergeTests(unittest.TestCase):
     def test_concentration_table_must_match_samples(self):
         for rows, error in (
             ("sample\t1\nsample\t2\n", "Duplicate spectra"),
-            ("other\t1\n", "missing: sample; not present in data folder: other"),
+            ("other\t1\n", "not present in data folder: other"),
         ):
             with self.subTest(rows=rows):
                 self.write_coefficients(rows)
                 with self.assertRaisesRegex(ValueError, error):
                     merge.load_concentration_coefficients(self.folder, ["sample"])
+
+    def test_empty_selection_and_invalid_short_names_leave_existing_outputs_untouched(self):
+        output = merge.merge_spectra(self.folder)
+        original_workbook = output.read_bytes()
+        table_file = self.folder / "concentration_table.txt"
+        self.write_spectrum("second", [4, 6, 8])
+        for rows, error in (
+            ("", "No sample spectra listed"),
+            ("sample\t1\t7\tduplicate\nsecond\t2\t7\tduplicate\n", "Duplicate short names"),
+            ("sample\t1\t7\tzero\n", "conflict with workbook headers"),
+            ("sample\t1\t7\twavelength_nm\n", "conflict with workbook headers"),
+            ("missing\t1\t7\tMissing\n", "not present in data folder: missing"),
+        ):
+            with self.subTest(rows=rows):
+                contents = "\t".join(merge.CONCENTRATION_COLUMNS) + "\n" + rows
+                table_file.write_text(contents, encoding="utf-8")
+                original_table = table_file.read_bytes()
+                with self.assertRaisesRegex(ValueError, error):
+                    merge.merge_spectra(self.folder)
+                self.assertEqual(table_file.read_bytes(), original_table)
+                self.assertEqual(output.read_bytes(), original_workbook)
 
     def test_missing_markers_and_empty_blocks_are_rejected(self):
         file = self.folder / "malformed.csv"

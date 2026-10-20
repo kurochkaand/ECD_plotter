@@ -50,19 +50,27 @@ def read_acquisition_datetime(file: Path) -> datetime:
     )
 
 
-def find_spectral_files(folder: Path) -> list[Path]:
-    """Find CSV files ordered by acquisition date/time, earliest first."""
+def list_spectral_files(folder: Path) -> list[Path]:
+    """Discover CSV files without reading spectra that may be excluded."""
     if not folder.is_dir():
         raise NotADirectoryError(f"Data folder not found: {folder}")
 
-    files = sorted(
-        (file for file in folder.glob("*.csv") if file.is_file()),
-        key=lambda file: (read_acquisition_datetime(file), file.name.casefold()),
-    )
+    files = [file for file in folder.glob("*.csv") if file.is_file()]
     if not files:
         raise FileNotFoundError(f"No CSV files found directly inside {folder}")
-
     return files
+
+
+def find_spectral_files(
+    folder: Path, *, included_names: set[str] | None = None,
+) -> list[Path]:
+    """Order included CSV files by acquisition date/time, earliest first."""
+    files = list_spectral_files(folder)
+    if included_names is not None:
+        files = [file for file in files if file.stem in included_names]
+    return sorted(
+        files, key=lambda file: (read_acquisition_datetime(file), file.name.casefold()),
+    )
 
 
 def read_spectrum(file: Path) -> pd.DataFrame:
@@ -181,22 +189,23 @@ def determine_short_names(
         not all(labels.values())
         or len(set(labels.values())) != len(labels)
         or any(label in {"zero", "wavelength_nm"} for label in shortened.values())
+        or subtraction_reference in shortened.values()
     ):
         return full_names
     return labels
 
 
 def load_concentration_table(
-    folder: Path, sample_names: list[str], *, refresh_ph: bool = False,
+    folder: Path, sample_names: list[str], *,
     subtraction_reference: str | None = None,
 ) -> pd.DataFrame:
-    """Create or validate coefficients and pH, and regenerate short names."""
+    """Create defaults once; read existing sample selections without rewriting."""
     concentration_file = folder / "concentration_table.txt"
     created = not concentration_file.exists()
     if created:
         concentration_table = pd.DataFrame(
             {
-                "spectrum": sample_names,
+                "spectrum": [name for name in sample_names if name != subtraction_reference],
                 "concentration_coefficient": 1.0,
             }
         )
@@ -239,13 +248,24 @@ def load_concentration_table(
                 f"Duplicate spectra in {concentration_file}: {', '.join(duplicates)}"
             )
 
+    # References from older tables are accepted but never treated as samples.
+    concentration_table = concentration_table[
+        concentration_table["spectrum"] != subtraction_reference
+    ].copy()
+    extra_spectra = [
+        name for name in concentration_table["spectrum"] if name not in sample_names
+    ]
+    if extra_spectra:
+        raise ValueError(
+            f"{concentration_file} lists spectra not present in data folder: "
+            + ", ".join(extra_spectra)
+        )
+    if concentration_table.empty:
+        raise ValueError(f"No sample spectra listed in {concentration_file}.")
+
     inferred_ph = concentration_table["spectrum"].map(extract_ph_from_name).astype(float)
     if "Ph" not in concentration_table:
         concentration_table["Ph"] = inferred_ph.fillna(7.0)
-    elif refresh_ph:
-        concentration_table["Ph"] = inferred_ph.fillna(
-            concentration_table["Ph"]
-        ).fillna(7.0)
     else:
         concentration_table["Ph"] = concentration_table["Ph"].fillna(
             inferred_ph
@@ -257,19 +277,6 @@ def load_concentration_table(
     coefficients = concentration_table.set_index("spectrum")[
         "concentration_coefficient"
     ]
-    missing_spectra = [name for name in sample_names if name not in coefficients.index]
-    extra_spectra = [name for name in coefficients.index if name not in sample_names]
-    if missing_spectra or extra_spectra:
-        problems = []
-        if missing_spectra:
-            problems.append(f"missing: {', '.join(missing_spectra)}")
-        if extra_spectra:
-            problems.append(f"not present in data folder: {', '.join(extra_spectra)}")
-        raise ValueError(
-            f"{concentration_file} does not match the CSV files "
-            f"({'; '.join(problems)})"
-        )
-
     invalid = coefficients[
         ~coefficients.map(isfinite) | (coefficients <= 0)
     ].index.tolist()
@@ -278,23 +285,38 @@ def load_concentration_table(
             "Concentration coefficients must be finite and greater than zero for: "
             + ", ".join(invalid)
         )
-    concentration_table = concentration_table.set_index("spectrum").loc[sample_names]
-    concentration_table["short name"] = pd.Series(
-        determine_short_names(sample_names, subtraction_reference)
-    )
-    concentration_table.to_csv(concentration_file, sep="\t", index=True)
+    concentration_table = concentration_table.set_index("spectrum")
+    included_names = [name for name in sample_names if name in concentration_table.index]
+    concentration_table = concentration_table.loc[included_names]
+    default_names = pd.Series(determine_short_names(included_names, subtraction_reference))
+    if "short name" not in concentration_table:
+        concentration_table["short name"] = default_names
+    else:
+        concentration_table["short name"] = concentration_table["short name"].fillna(default_names)
+    labels = concentration_table["short name"]
+    if labels.duplicated().any():
+        duplicates = labels[labels.duplicated()].tolist()
+        raise ValueError(f"Duplicate short names in {concentration_file}: {', '.join(duplicates)}")
+    reserved = {"zero", "wavelength_nm", subtraction_reference}
+    invalid_labels = labels[labels.isin(reserved)].tolist()
+    if invalid_labels:
+        raise ValueError(
+            f"Short names in {concentration_file} conflict with workbook headers: "
+            + ", ".join(invalid_labels)
+        )
     if created:
+        concentration_table.to_csv(concentration_file, sep="\t", index=True)
         print(f"Created {concentration_file}")
     return concentration_table
 
 
 def load_concentration_coefficients(
-    folder: Path, sample_names: list[str], *, refresh_ph: bool = False,
+    folder: Path, sample_names: list[str], *,
     subtraction_reference: str | None = None,
 ) -> pd.Series:
-    """Return coefficients by filename while updating the concentration table."""
+    """Return coefficients for the samples selected by the concentration table."""
     return load_concentration_table(
-        folder, sample_names, refresh_ph=refresh_ph,
+        folder, sample_names,
         subtraction_reference=subtraction_reference,
     )["concentration_coefficient"]
 
@@ -461,13 +483,24 @@ def plot_corrected_spectra(
 
 
 def merge_spectra(
-    folder: Path, *, refresh_ph: bool = False, subtract: str | None = None,
+    folder: Path, *, subtract: str | None = None,
     plot: bool = False, smooth: int | None = None, ht_threshold: float | None = None,
 ) -> Path:
     """Write measured channels and corrected CD/Abs sheets on the wavelength axis."""
     if ht_threshold is not None and (not isfinite(ht_threshold) or ht_threshold < 0):
         raise ValueError("The --ht-threshold value must be finite and greater than or equal to zero.")
-    files = find_spectral_files(folder)
+    available_names = [file.stem for file in list_spectral_files(folder)]
+    subtraction_reference = select_subtraction_reference(available_names, subtract)
+    concentration_table = None
+    included_names = None
+    if (folder / "concentration_table.txt").exists():
+        concentration_table = load_concentration_table(
+            folder, available_names, subtraction_reference=subtraction_reference,
+        )
+        included_names = set(concentration_table.index)
+        if subtraction_reference is not None:
+            included_names.add(subtraction_reference)
+    files = find_spectral_files(folder, included_names=included_names)
     reference_frame: pd.DataFrame | None = None
     channel_columns: dict[str, list[pd.Series]] = {
         sheet_name: [] for sheet_name in CHANNEL_SHEETS
@@ -499,13 +532,12 @@ def merge_spectra(
         abs_data[file.stem] = frame["absorbance"]
 
     sample_names = list(cd_data)
-    subtraction_reference = select_subtraction_reference(sample_names, subtract)
     if smooth is not None:
         cd_data = smooth_cd_spectra(cd_data, smooth, allow_gaps=ht_threshold is not None)
-    concentration_table = load_concentration_table(
-        folder, sample_names, refresh_ph=refresh_ph,
-        subtraction_reference=subtraction_reference,
-    )
+    if concentration_table is None:
+        concentration_table = load_concentration_table(
+            folder, sample_names, subtraction_reference=subtraction_reference,
+        )
     coefficients = concentration_table["concentration_coefficient"]
     short_names = concentration_table["short name"].to_dict()
 
@@ -557,11 +589,6 @@ def main() -> int:
         help="Data-folder override for DEFAULT_FOLDER configured in the script.",
     )
     parser.add_argument(
-        "--refresh-ph",
-        action="store_true",
-        help="Update existing Ph values from filenames, keeping concentration coefficients.",
-    )
-    parser.add_argument(
         "--subtract",
         metavar="PREFIX",
         help="Subtract the CD and absorbance reference matching this filename prefix using Excel formulas.",
@@ -595,7 +622,7 @@ def main() -> int:
 
     try:
         output_file = merge_spectra(
-            args.folder.resolve(), refresh_ph=args.refresh_ph, subtract=args.subtract,
+            args.folder.resolve(), subtract=args.subtract,
             plot=args.plot, smooth=args.smooth, ht_threshold=args.ht_threshold,
         )
     except (OSError, ValueError) as exc:
