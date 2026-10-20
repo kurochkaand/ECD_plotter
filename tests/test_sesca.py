@@ -17,6 +17,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import deconvolution
+import merge
 import sesca_integration as sesca
 
 
@@ -235,6 +236,45 @@ class SescaTests(unittest.TestCase):
         with patch.object(sys, "argv", arguments), patch.object(plt, "show", side_effect=inspect_saved_results) as show:
             self.assertEqual(deconvolution.main(), 0)
         show.assert_called_once_with(block=True)
+
+    def test_merge_short_names_reach_mre_sesca_results_and_deconvolution_plot(self):
+        folder = self.root / "short names"
+        folder.mkdir()
+        names = ["peptide_first_export", "peptide_second_export", "H2O_reference"]
+        for name in names:
+            rows = "".join(
+                f"{wave},{0 if name == names[2] else value * 0.002},400,0.1\n"
+                for wave, value in self.rows
+            )
+            (folder / f"{name}.csv").write_text(
+                "TITLE,Instrument export\nDATA TYPE,\nORIGIN,JASCO\nOWNER,\n"
+                "DATE,26/10/14\nTIME,18:41:36\nXYDATA\n" + rows
+                + "##### Extended Information\n", encoding="latin-1",
+            )
+        output = merge.merge_spectra(folder, subtract="H2O")
+
+        def inspect_chart(*args, **kwargs):
+            self.assertEqual(
+                [tick.get_text() for tick in plt.gcf().axes[0].get_yticklabels()],
+                ["first", "second"],
+            )
+
+        with patch.object(plt, "show", side_effect=inspect_chart) as show:
+            deconvolution.convert_to_mre(
+                folder, path_in_mm=1, concentration_in_M=0.0001, num_of_aa=20,
+                sesca_options=self.options, plot=True,
+            )
+        show.assert_called_once_with(block=True)
+        workbook = load_workbook(output, data_only=True)
+        try:
+            self.assertEqual([cell.value for cell in workbook["MRE"][1]],
+                             ["wavelength_nm", "first", "second"])
+            self.assertEqual([row[0] for row in list(workbook["SESCA_results"].values)[1:]],
+                             ["first", "second"])
+            self.assertEqual({row[0] for row in list(workbook["SESCA_fit"].values)[1:]},
+                             {"first", "second"})
+        finally:
+            workbook.close()
 
     def test_all_skipped_results_do_not_open_an_empty_plot(self):
         output = self.root / "skipped.xlsx"

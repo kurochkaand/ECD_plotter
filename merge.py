@@ -10,6 +10,7 @@ from datetime import datetime
 from io import StringIO
 from itertools import islice
 from math import isfinite
+from os.path import commonprefix
 from pathlib import Path
 
 import numpy as np
@@ -24,7 +25,7 @@ DEFAULT_FOLDER = Path(
 )
 SPECTRAL_COLUMNS = ["wavelength_nm", "cd_mdeg", "ht_v", "absorbance"]
 CHANNEL_SHEETS = {"CD": "cd_mdeg", "HT": "ht_v", "Abs": "absorbance"}
-CONCENTRATION_COLUMNS = ["spectrum", "concentration_coefficient", "Ph"]
+CONCENTRATION_COLUMNS = ["spectrum", "concentration_coefficient", "Ph", "short name"]
 
 
 def read_acquisition_datetime(file: Path) -> datetime:
@@ -157,10 +158,39 @@ def extract_ph_from_name(spectrum_name: str) -> float | None:
     return float(match.group(1)) if match else None
 
 
-def load_concentration_coefficients(
-    folder: Path, sample_names: list[str], *, refresh_ph: bool = False
-) -> pd.Series:
-    """Create or validate the concentration table and return coefficients by name."""
+def determine_short_names(
+    sample_names: list[str], subtraction_reference: str | None = None,
+) -> dict[str, str]:
+    """Remove shared filename affixes, keeping nonempty, unique spectrum labels."""
+    full_names = dict(zip(sample_names, sample_names))
+    samples = [name for name in sample_names if name != subtraction_reference]
+    if len(samples) < 2:
+        return full_names
+
+    prefix = commonprefix(samples)
+    remainders = [name[len(prefix):] for name in samples]
+    suffix = commonprefix([name[::-1] for name in remainders])[::-1]
+    shortened = {
+        name: remainder[:len(remainder) - len(suffix)].strip(" _-\t")
+        for name, remainder in zip(samples, remainders)
+    }
+    labels = full_names | shortened
+    # Keep original stems if trimming removes a whole name or creates ambiguity.
+    # The reference retains its full stem and never participates in affix detection.
+    if (
+        not all(labels.values())
+        or len(set(labels.values())) != len(labels)
+        or any(label in {"zero", "wavelength_nm"} for label in shortened.values())
+    ):
+        return full_names
+    return labels
+
+
+def load_concentration_table(
+    folder: Path, sample_names: list[str], *, refresh_ph: bool = False,
+    subtraction_reference: str | None = None,
+) -> pd.DataFrame:
+    """Create or validate coefficients and pH, and regenerate short names."""
     concentration_file = folder / "concentration_table.txt"
     created = not concentration_file.exists()
     if created:
@@ -175,26 +205,29 @@ def load_concentration_coefficients(
             header = next(csv.reader(stream, delimiter="\t"), [])
             # Accept extra alignment tabs in a manually edited header.
             column_count = sum(bool(column.strip()) for column in header)
-            if column_count not in (2, 3):
+            if column_count not in (2, 3, 4):
                 raise ValueError(
-                    f"{concentration_file} must have two or three tab-separated columns: "
-                    "spectrum name, concentration coefficient, and optional Ph"
+                    f"{concentration_file} must have two, three, or four tab-separated columns: "
+                    "spectrum name, concentration coefficient, optional Ph and short name"
                 )
-            concentration_table = pd.read_csv(
-                stream,
-                # Repeated tabs are visual alignment, not additional columns.
-                sep=r"\t+",
-                engine="python",
-                header=None,
-                names=CONCENTRATION_COLUMNS[:column_count],
-                dtype={"spectrum": str},
-            )
-        # Pandas can silently use extra fields as an index instead of rejecting them.
-        if not isinstance(concentration_table.index, pd.RangeIndex):
-            raise ValueError(
-                f"{concentration_file} must have {column_count} tab-separated columns "
-                "per row; found extra values"
-            )
+            rows = []
+            for fields in csv.reader(stream, delimiter="\t"):
+                fields = [field.strip() for field in fields]
+                if not any(fields):
+                    continue
+                while fields and not fields[-1]:
+                    fields.pop()
+                # Legacy tables use repeated tabs for alignment. Four-column
+                # rows also allow a blank Ph cell before the short name.
+                if column_count < 4 or len(fields) > column_count or (len(fields) > 1 and not fields[1]):
+                    fields = [field for field in fields if field]
+                if len(fields) > column_count:
+                    raise ValueError(
+                        f"{concentration_file} must have {column_count} tab-separated columns "
+                        "per row; found extra values"
+                    )
+                rows.append([field or None for field in fields] + [None] * (column_count - len(fields)))
+            concentration_table = pd.DataFrame(rows, columns=CONCENTRATION_COLUMNS[:column_count])
         concentration_table["spectrum"] = (
             concentration_table["spectrum"].astype(str).str.strip()
         )
@@ -219,7 +252,7 @@ def load_concentration_coefficients(
         ).fillna(7.0)
 
     concentration_table["concentration_coefficient"] = pd.to_numeric(
-        concentration_table["concentration_coefficient"], errors="raise"
+        concentration_table["concentration_coefficient"], errors="coerce"
     )
     coefficients = concentration_table.set_index("spectrum")[
         "concentration_coefficient"
@@ -246,10 +279,24 @@ def load_concentration_coefficients(
             + ", ".join(invalid)
         )
     concentration_table = concentration_table.set_index("spectrum").loc[sample_names]
+    concentration_table["short name"] = pd.Series(
+        determine_short_names(sample_names, subtraction_reference)
+    )
     concentration_table.to_csv(concentration_file, sep="\t", index=True)
     if created:
         print(f"Created {concentration_file}")
-    return concentration_table["concentration_coefficient"]
+    return concentration_table
+
+
+def load_concentration_coefficients(
+    folder: Path, sample_names: list[str], *, refresh_ph: bool = False,
+    subtraction_reference: str | None = None,
+) -> pd.Series:
+    """Return coefficients by filename while updating the concentration table."""
+    return load_concentration_table(
+        folder, sample_names, refresh_ph=refresh_ph,
+        subtraction_reference=subtraction_reference,
+    )["concentration_coefficient"]
 
 
 def select_subtraction_reference(sample_names: list[str], prefix: str | None) -> str | None:
@@ -351,6 +398,7 @@ def plot_corrected_spectra(
     coefficients: pd.Series,
     subtraction_reference: str | None,
     *, smooth_window: int | None = None, ht_threshold: float | None = None,
+    short_names: dict[str, str] | None = None,
 ) -> None:
     """Display corrected CD and absorbance panels without reading Excel formulas."""
     import matplotlib.pyplot as plt
@@ -387,7 +435,7 @@ def plot_corrected_spectra(
                 axis.plot(
                     wavelengths,
                     corrected[name],
-                    label=name,
+                    label=short_names[name] if short_names is not None else name,
                     linewidth=1.3,
                     color=colors(index / max(len(sample_names) - 1, 1)),
                 )
@@ -454,9 +502,12 @@ def merge_spectra(
     subtraction_reference = select_subtraction_reference(sample_names, subtract)
     if smooth is not None:
         cd_data = smooth_cd_spectra(cd_data, smooth, allow_gaps=ht_threshold is not None)
-    coefficients = load_concentration_coefficients(
-        folder, sample_names, refresh_ph=refresh_ph
+    concentration_table = load_concentration_table(
+        folder, sample_names, refresh_ph=refresh_ph,
+        subtraction_reference=subtraction_reference,
     )
+    coefficients = concentration_table["concentration_coefficient"]
+    short_names = concentration_table["short name"].to_dict()
 
     # CD inputs include optional smoothing; Abs inputs retain the measured values.
     spectral_channels = {"CD": cd_data, "Abs": abs_data}
@@ -476,9 +527,13 @@ def merge_spectra(
     output_file = folder.parent / f"{folder.name}-combined.xlsx"
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
         for sheet_name, columns in channel_columns.items():
-            pd.concat(columns, axis=1).to_excel(writer, sheet_name=sheet_name, index=False)
+            pd.concat(columns, axis=1).rename(columns=short_names).to_excel(
+                writer, sheet_name=sheet_name, index=False
+            )
         for channel_name, summary in summaries.items():
-            summary.to_excel(writer, sheet_name=f"{channel_name}_subtr", index=False)
+            summary.rename(columns=short_names).to_excel(
+                writer, sheet_name=f"{channel_name}_subtr", index=False
+            )
         if subtraction_reference is not None:
             writer.book.calculation = CalcProperties(
                 calcMode="auto", fullCalcOnLoad=True, forceFullCalc=True
@@ -486,7 +541,7 @@ def merge_spectra(
     if plot:
         plot_corrected_spectra(
             channel_columns["CD"][0], spectral_channels, coefficients, subtraction_reference,
-            smooth_window=smooth, ht_threshold=ht_threshold,
+            smooth_window=smooth, ht_threshold=ht_threshold, short_names=short_names,
         )
     return output_file
 

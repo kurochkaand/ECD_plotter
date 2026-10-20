@@ -99,7 +99,85 @@ class MergeTests(unittest.TestCase):
         table = pd.read_csv(self.folder / "concentration_table.txt", sep="\t")
         self.assertEqual(table.to_dict("list"), {
             "spectrum": ["sample"], "concentration_coefficient": [1.0], "Ph": [7.0],
+            "short name": ["sample"],
         })
+
+    def test_short_names_remove_common_affixes_and_keep_unique_nonempty_labels(self):
+        for names, expected in (
+            (["run_first_export", "run_second_export"], ["first", "second"]),
+            (["first_export", "second_export"], ["first", "second"]),
+            (["run_first", "run_second"], ["first", "second"]),
+            (["only_sample_export"], ["only_sample_export"]),
+            (["sample", "later sample"], ["sample", "later sample"]),
+            (["run_A_export", "run__A_export", "run_B_export"],
+             ["run_A_export", "run__A_export", "run_B_export"]),
+            (["run_zero_export", "run_sample_export"],
+             ["run_zero_export", "run_sample_export"]),
+        ):
+            with self.subTest(names=names):
+                labels = merge.determine_short_names(names)
+                self.assertEqual([labels[name] for name in names], expected)
+
+    def test_short_names_ignore_subtraction_reference_in_table_workbook_and_plot(self):
+        first = "peptide_pH7.43_1mm_185-300nm_4sc_20nm-1"
+        second = "peptide_pH5.77_1mm_185-300nm_4sc_20nm-1"
+        reference = "H2O_1mm_185-300nm_4sc_20nm-1"
+        (self.folder / "sample.csv").rename(self.folder / f"{first}.csv")
+        self.write_spectrum(second, [4, 6, 8], time="19:00:00")
+        self.write_spectrum(reference, [1, 2, 3], time="20:00:00")
+        table_file = self.folder / "concentration_table.txt"
+        table_file.write_text(
+            "spectrum\tconcentration_coefficient\tPh\n"
+            f"{second}\t4\t6.8\n{reference}\t1\t7\n{first}\t2\t6.5\n",
+            encoding="utf-8",
+        )
+
+        def inspect_plot(*args, **kwargs):
+            for axis in plt.gcf().axes:
+                self.assertEqual([line.get_label() for line in axis.lines], ["7.43", "5.77"])
+            np.testing.assert_allclose(plt.gcf().axes[0].lines[0].get_ydata(), [2, 3, 4])
+
+        with patch.object(plt, "show", side_effect=inspect_plot):
+            output = merge.merge_spectra(self.folder, subtract="H2O", plot=True)
+        workbook = load_workbook(output)
+        try:
+            raw_names = ["wavelength_nm", "7.43", "5.77", reference]
+            for sheet in ("CD", "HT", "Abs"):
+                self.assertEqual([cell.value for cell in workbook[sheet][1]], raw_names)
+            for sheet in ("CD_subtr", "Abs_subtr"):
+                self.assertEqual([cell.value for cell in workbook[sheet][1]],
+                                 [*raw_names, "zero", "7.43", "5.77"])
+                self.assertEqual(workbook[sheet]["F2"].value, "=(B2-$D2)/2.0")
+        finally:
+            workbook.close()
+        table = pd.read_csv(table_file, sep="\t", dtype={"short name": str})
+        self.assertEqual(table["spectrum"].tolist(), [first, second, reference])
+        self.assertEqual(table["short name"].tolist(), ["7.43", "5.77", reference])
+        self.assertEqual(table["concentration_coefficient"].tolist(), [2, 4, 1])
+        self.assertEqual(table["Ph"].tolist(), [6.5, 6.8, 7.0])
+        # A subsequent merge reads the new four-column table and keeps the labels.
+        merge.merge_spectra(self.folder, subtract="H2O")
+        pd.testing.assert_frame_equal(
+            pd.read_csv(table_file, sep="\t", dtype={"short name": str}), table,
+        )
+
+    def test_four_column_table_regenerates_short_names_and_fills_missing_ph(self):
+        names = ["peptide_pH7.43_export", "peptide_pH5.77_export"]
+        for aligned in (False, True):
+            with self.subTest(aligned=aligned):
+                separator = "\t\t" if aligned else "\t"
+                table_file = self.folder / "concentration_table.txt"
+                table_file.write_text(
+                    separator.join(merge.CONCENTRATION_COLUMNS) + "\n"
+                    + separator.join([names[1], "3", "6.5", "outdated"]) + "\n"
+                    + f"{names[0]}\t2\t\told label\n",
+                    encoding="utf-8",
+                )
+                merge.load_concentration_coefficients(self.folder, names)
+                table = pd.read_csv(table_file, sep="\t", dtype={"short name": str})
+                self.assertEqual(table["short name"].tolist(), ["7.43", "5.77"])
+                self.assertEqual(table["Ph"].tolist(), [7.43, 6.5])
+                self.assertEqual(table["concentration_coefficient"].tolist(), [2, 3])
 
     def test_ph_is_extracted_from_filename_tokens(self):
         for name, expected in (
@@ -180,6 +258,12 @@ class MergeTests(unittest.TestCase):
                 "H2O reference\t\t3\t\t\n"
                 "sample_pH5.77\t2\t\n",
                 [7.0, 5.77],
+            ),
+            (
+                "spectrum\t\tconcentration_coefficient\t\tPh\tshort name\t\n"
+                "H2O reference\t\t3\t7.0\n"
+                "sample_pH5.77\t2\t6.8\n",
+                [7.0, 6.8],
             ),
         ):
             with self.subTest(contents=contents):

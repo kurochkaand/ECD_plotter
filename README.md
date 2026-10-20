@@ -12,10 +12,11 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-## My latest usecase
+## My latest usecases
 
 ```powershell
-.\.venv\Scripts\python.exe merge.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14-Cd" --subtract "H2O" --plot --smooth 50 --ht-threshold 500
+python merge.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14-Cd" --subtract "H2O" --plot --smooth 50 --ht-threshold 500
+python deconvolution.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14-Cd" --path-in-mm 1 --num-of-aa 1 --concentration-in-mM 1 --plot
 ```
 
 ## Merge instrument exports
@@ -59,6 +60,16 @@ are ignored. Each run writes the table back with one tab between columns.
 Each run sorts the table rows into acquisition order, keeping existing coefficients
 and `Ph` values attached to their spectrum names. All workbook sheets use this
 same spectrum order for their columns.
+The table also includes a `short name` column, regenerated on every merge by
+removing the longest common prefix and suffix from the filename stems and
+trimming surrounding spaces, underscores, and hyphens. For example,
+`peptide_pH7.43_1mm` and `peptide_pH5.77_1mm` become `7.43` and `5.77`.
+The reference selected by `--subtract` is excluded from this comparison and
+keeps its full filename stem. A single remaining sample keeps its full stem;
+full stems are also retained if shortening would create an empty or duplicate
+label or a reserved workbook header (`zero` or `wavelength_nm`). Existing
+two- and three-column tables are upgraded automatically, preserving coefficients
+and pH values. Full filenames remain in the `spectrum` column to identify inputs.
 Missing `Ph` columns or blank values in existing tables are populated the same way.
 To replace existing pH values with those from the filenames while keeping your
 concentration coefficients, add `--refresh-ph`:
@@ -91,7 +102,8 @@ retains unsmoothed measurements, with any requested HT exclusions; `HT` and `Abs
 retain their original values.
 
 Each channel sheet starts with `wavelength_nm`, followed by one column per spectrum
-named after the CSV filename without its extension. The `RAW` sheet is replaced
+named using the table's `short name`. The input and corrected blocks also use
+these short names, as do the merge plot legends. The `RAW` sheet is replaced
 by these three channel sheets. CD and absorbance are concentration-normalized in
 `CD_subtr` and `Abs_subtr`, respectively. Smoothing and HT filtering apply to CD;
 absorbance correction uses the original absorbance measurements. Missing sample
@@ -271,20 +283,22 @@ The input passed to SESCA is **kMRE = MRE / 1000**, matching its basis library u
 
 Optional controls:
 
-| Flag | Purpose | Default |
-| --- | --- | --- |
-| `--mre-only` | Convert without SESCA; remove any old SESCA output sheets. | Run SESCA. |
-| `--plot` | Display structure percentages from the saved `SESCA_results` sheet. | No plot window. |
-| `--sesca-dir PATH` | SESCA root containing `scripts/` and `libs/`. | `SESCA_HOME`, then local installation. |
-| `--sesca-basis NAME_OR_PATH` | Standalone basis name or basis file path. | `DS-dT`. |
-| `--sesca-min-nm VALUE` | Lower fit wavelength bound. | `190`. |
-| `--sesca-max-nm VALUE` | Upper fit wavelength bound. | `250`. |
-| `--sesca-repeats INTEGER` | Number of fit restarts. | `10`. |
-| `--sesca-seed INTEGER` | Random seed between 0 and 4294967295. | `0`. |
+| Flag                         | Purpose                                                             | Default                                |
+| ---------------------------- | ------------------------------------------------------------------- | -------------------------------------- |
+| `--mre-only`                 | Convert without SESCA; remove any old SESCA output sheets.          | Run SESCA.                             |
+| `--plot`                     | Display structure percentages from the saved `SESCA_results` sheet. | No plot window.                        |
+| `--sesca-dir PATH`           | SESCA root containing `scripts/` and `libs/`.                       | `SESCA_HOME`, then local installation. |
+| `--sesca-basis NAME_OR_PATH` | Standalone basis name or basis file path.                           | `DS-dT`.                               |
+| `--sesca-min-nm VALUE`       | Lower fit wavelength bound.                                         | `190`.                                 |
+| `--sesca-max-nm VALUE`       | Upper fit wavelength bound.                                         | `250`.                                 |
+| `--sesca-repeats INTEGER`    | Number of fit restarts.                                             | `10`.                                  |
+| `--sesca-seed INTEGER`       | Random seed between 0 and 4294967295.                               | `0`.                                   |
 
 Add `--plot` to display a horizontal stacked bar chart with one bar per spectrum
 and a color for each structure class in the selected basis. Spectra follow their
 workbook order; skipped fits are labeled `Skipped` without a composition bar.
+MRE headers, SESCA spectrum names, and plot labels inherit the short names from
+the corrected workbook headers generated by `merge.py`.
 The workbook is saved before the plot opens. Close the plot window to return to
 the terminal. If every fit is skipped, the command reports that no plot is
 available. `--plot` cannot be combined with `--mre-only`.
