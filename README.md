@@ -274,12 +274,24 @@ Optional controls:
 | Flag | Purpose | Default |
 | --- | --- | --- |
 | `--mre-only` | Convert without SESCA; remove any old SESCA output sheets. | Run SESCA. |
+| `--plot` | Display structure percentages from the saved `SESCA_results` sheet. | No plot window. |
 | `--sesca-dir PATH` | SESCA root containing `scripts/` and `libs/`. | `SESCA_HOME`, then local installation. |
 | `--sesca-basis NAME_OR_PATH` | Standalone basis name or basis file path. | `DS-dT`. |
 | `--sesca-min-nm VALUE` | Lower fit wavelength bound. | `190`. |
 | `--sesca-max-nm VALUE` | Upper fit wavelength bound. | `250`. |
 | `--sesca-repeats INTEGER` | Number of fit restarts. | `10`. |
 | `--sesca-seed INTEGER` | Random seed between 0 and 4294967295. | `0`. |
+
+Add `--plot` to display a horizontal stacked bar chart with one bar per spectrum
+and a color for each structure class in the selected basis. Spectra follow their
+workbook order; skipped fits are labeled `Skipped` without a composition bar.
+The workbook is saved before the plot opens. Close the plot window to return to
+the terminal. If every fit is skipped, the command reports that no plot is
+available. `--plot` cannot be combined with `--mre-only`.
+
+```powershell
+.\.venv\Scripts\python.exe deconvolution.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14-Cd" --path-in-mm 1 --num-of-aa 20 --concentration-in-mM 0.1 --plot
+```
 
 For example, select the six-class `DS5-4` basis or a different fit range:
 

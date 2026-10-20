@@ -15,6 +15,7 @@ from hashlib import sha256
 from pathlib import Path
 
 import numpy as np
+from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 from scipy.optimize import OptimizeWarning
@@ -257,3 +258,62 @@ def write_results(workbook, analysis: SescaAnalysis) -> None:
     for row in curves.iter_rows(min_row=2, min_col=3):
         for cell in row:
             cell.number_format = "0.000000"
+
+
+def plot_sesca_results(workbook_file: Path) -> None:
+    """Display saved structure fractions as stacked percentages in spectrum order."""
+    workbook = load_workbook(workbook_file, read_only=True, data_only=True)
+    try:
+        if RESULTS_SHEET not in workbook.sheetnames:
+            raise ValueError(f"No {RESULTS_SHEET} sheet to plot in {workbook_file}.")
+        rows = workbook[RESULTS_SHEET].iter_rows(values_only=True)
+        headers = list(next(rows))
+        class_columns = [i for i, name in enumerate(headers) if isinstance(name, str) and name.endswith("_fraction")]
+        if not class_columns or "spectrum" not in headers or "status" not in headers:
+            raise ValueError(f"{RESULTS_SHEET} must contain spectrum, status, and structure fraction columns.")
+        records = list(rows)
+    finally:
+        workbook.close()
+
+    name_column, status_column = headers.index("spectrum"), headers.index("status")
+    valid = [row[status_column] == "ok" for row in records]
+    if not any(valid):
+        print(f"No fitted spectra in {RESULTS_SHEET}; no plot to display.")
+        return
+    fractions = np.asarray([
+        [row[column] for column in class_columns] if fitted else [0.0] * len(class_columns)
+        for row, fitted in zip(records, valid)
+    ], dtype=float)
+    if (not np.isfinite(fractions).all() or np.any(fractions < 0) or np.any(fractions > 1)
+            or not np.allclose(fractions[valid].sum(axis=1), 1.0, atol=1e-6)):
+        raise ValueError(f"Invalid structure fractions in {RESULTS_SHEET}.")
+
+    import matplotlib.pyplot as plt
+
+    figure, axis = plt.subplots(figsize=(16, max(5, 0.45 * len(records) + 2)))
+    try:
+        positions = np.arange(len(records))
+        left = np.zeros(len(records))
+        colors = plt.get_cmap("tab20")
+        for index, column in enumerate(class_columns):
+            percentages = fractions[:, index] * 100.0
+            axis.barh(
+                positions, percentages, left=left,
+                label=headers[column].removesuffix("_fraction"), color=colors(index),
+            )
+            left += percentages
+        for position, fitted in enumerate(valid):
+            if not fitted:
+                axis.text(2, position, "Skipped", va="center", color="dimgray", fontstyle="italic")
+        axis.set_yticks(positions, labels=[row[name_column] for row in records], fontsize=8)
+        axis.invert_yaxis()
+        axis.set_xlim(0, 100)
+        axis.set_xlabel("Secondary structure (%)")
+        axis.set_title("SESCA secondary-structure composition")
+        axis.set_axisbelow(True)
+        axis.grid(axis="x", alpha=0.25)
+        axis.legend(loc="upper left", bbox_to_anchor=(1.02, 1))
+        figure.tight_layout()
+        plt.show(block=True)
+    finally:
+        plt.close(figure)

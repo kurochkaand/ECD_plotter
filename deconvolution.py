@@ -20,7 +20,7 @@ from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 from openpyxl.worksheet.worksheet import Worksheet
 
 from sesca_integration import (
-    FIT_SHEET, RESULTS_SHEET, SescaOptions, fit_spectra, write_results,
+    FIT_SHEET, RESULTS_SHEET, SescaOptions, fit_spectra, plot_sesca_results, write_results,
 )
 
 
@@ -116,8 +116,11 @@ def read_corrected_cd(sheet: Worksheet) -> tuple[list[str], list[list[float | No
 def convert_to_mre(
     folder: Path, *, path_in_mm: float, num_of_aa: int, concentration_in_M: float,
     sesca_options: SescaOptions | None = None,
+    plot: bool = False,
 ) -> Path:
     """Append numeric MRE spectra using the concentration targeted by merge.py."""
+    if plot and sesca_options is None:
+        raise ValueError("--plot requires SESCA fitting and cannot be combined with --mre-only.")
     for name, value in (("path_in_mm", path_in_mm), ("concentration_in_M", concentration_in_M)):
         if not isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be finite and greater than zero.")
@@ -206,6 +209,8 @@ def convert_to_mre(
         workbook.close()
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+    if plot:
+        plot_sesca_results(workbook_file)
     return workbook_file
 
 
@@ -221,7 +226,12 @@ def main() -> int:
         help="Peptide/protein concentration in millimolar before dilution correction "
              "(the concentration targeted by merge.py's relative coefficients).",
     )
-    parser.add_argument("--mre-only", action="store_true", help="Convert to MRE without running SESCA.")
+    display_mode = parser.add_mutually_exclusive_group()
+    display_mode.add_argument("--mre-only", action="store_true", help="Convert to MRE without running SESCA.")
+    display_mode.add_argument(
+        "--plot", action="store_true",
+        help="Display secondary-structure percentages from SESCA_results after saving.",
+    )
     parser.add_argument(
         "--sesca-dir", type=Path,
         help="SESCA root containing scripts/ and libs/. Default: SESCA_HOME or .sesca/SESCA_v097.",
@@ -246,6 +256,7 @@ def main() -> int:
             args.folder, path_in_mm=args.path_in_mm, num_of_aa=args.num_of_aa,
             concentration_in_M=args.concentration_in_mM / 1000.0,
             sesca_options=sesca_options,
+            plot=args.plot,
         )
     except (OSError, ValueError, RuntimeError, BadZipFile) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

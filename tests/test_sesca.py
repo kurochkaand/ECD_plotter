@@ -1,5 +1,6 @@
 """Verify SESCA units, missing-data handling, and the real upstream engine."""
 
+import io
 import random
 import subprocess
 import sys
@@ -8,8 +9,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import matplotlib
 import numpy as np
 from openpyxl import Workbook, load_workbook
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 import deconvolution
 import sesca_integration as sesca
@@ -163,6 +168,95 @@ class SescaTests(unittest.TestCase):
         self.assertEqual(numpy_state[0], new_state[0])
         np.testing.assert_array_equal(numpy_state[1], new_state[1])
         self.assertEqual(numpy_state[2:], new_state[2:])
+
+    def test_plot_is_disabled_by_default(self):
+        folder, _ = self.write_combined()
+        with patch.object(deconvolution, "plot_sesca_results") as plot:
+            deconvolution.convert_to_mre(
+                folder, path_in_mm=1, concentration_in_M=0.0001, num_of_aa=20,
+                sesca_options=self.options,
+            )
+        plot.assert_not_called()
+
+    def test_plot_reads_saved_class_fractions_in_spectrum_order(self):
+        output = self.root / "results.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "SESCA_results"
+        classes = ["Helix1", "Beta1", "Helix2", "Turn1", "Turn2", "Other"]
+        sheet.append(["spectrum", "status", *[f"{name}_fraction" for name in classes], "RMSD_kMRE"])
+        fractions = np.asarray([[0.1, 0.2, 0.15, 0.25, 0.1, 0.2], [0] * 6, [0.5, 0.1, 0, 0, 0.1, 0.3]])
+        sheet.append(["first sample", "ok", *fractions[0], 0.4])
+        sheet.append(["excluded sample", "skipped", *[None] * 6, None])
+        sheet.append(["last sample", "ok", *fractions[2], 0.8])
+        workbook.save(output)
+        workbook.close()
+        figures = []
+
+        def inspect_chart(*args, **kwargs):
+            figure = plt.gcf()
+            figures.append(figure)
+            axis = figure.axes[0]
+            self.assertEqual(axis.get_xlabel(), "Secondary structure (%)")
+            self.assertEqual(axis.get_xlim(), (0, 100))
+            self.assertEqual([tick.get_text() for tick in axis.get_yticklabels()], [
+                "first sample", "excluded sample", "last sample",
+            ])
+            self.assertTrue(axis.yaxis_inverted())
+            self.assertEqual([item.get_text() for item in axis.get_legend().get_texts()], classes)
+            self.assertEqual([item.get_text() for item in axis.texts], ["Skipped"])
+            for column, bars in enumerate(axis.containers):
+                np.testing.assert_allclose([bar.get_width() for bar in bars], fractions[:, column] * 100)
+                np.testing.assert_allclose([bar.get_x() for bar in bars], fractions[:, :column].sum(axis=1) * 100)
+
+        with patch.object(plt, "show", side_effect=inspect_chart) as show:
+            sesca.plot_sesca_results(output)
+        show.assert_called_once_with(block=True)
+        self.assertFalse(plt.fignum_exists(figures[0].number))
+
+    def test_cli_plot_opens_after_workbook_is_saved(self):
+        folder, output = self.write_combined()
+
+        def inspect_saved_results(*args, **kwargs):
+            saved = load_workbook(output, read_only=True, data_only=True)
+            try:
+                self.assertIn("SESCA_results", saved.sheetnames)
+                self.assertEqual(saved["SESCA_results"]["D2"].value, 0.2)
+            finally:
+                saved.close()
+            bars = plt.gcf().axes[0].containers
+            np.testing.assert_allclose([group[0].get_width() for group in bars], [20, 30, 50])
+
+        arguments = [
+            "deconvolution.py", "--folder", str(folder), "--path-in-mm", "1",
+            "--num-of-aa", "20", "--concentration-in-mM", "0.1",
+            "--sesca-dir", str(self.root), "--plot",
+        ]
+        with patch.object(sys, "argv", arguments), patch.object(plt, "show", side_effect=inspect_saved_results) as show:
+            self.assertEqual(deconvolution.main(), 0)
+        show.assert_called_once_with(block=True)
+
+    def test_all_skipped_results_do_not_open_an_empty_plot(self):
+        output = self.root / "skipped.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "SESCA_results"
+        sheet.append(["spectrum", "status", "Alpha_fraction", "Beta_fraction", "Coil_fraction"])
+        sheet.append(["sample", "skipped", None, None, None])
+        workbook.save(output)
+        workbook.close()
+        stdout = io.StringIO()
+        with patch.object(plt, "show") as show, patch("sys.stdout", stdout):
+            sesca.plot_sesca_results(output)
+        show.assert_not_called()
+        self.assertIn("No fitted spectra", stdout.getvalue())
+
+    def test_plot_with_mre_only_does_not_modify_workbook(self):
+        folder, output = self.write_combined()
+        original = output.read_bytes()
+        with self.assertRaisesRegex(ValueError, "--mre-only"):
+            deconvolution.convert_to_mre(folder, path_in_mm=1, concentration_in_M=0.0001, num_of_aa=20, plot=True)
+        self.assertEqual(output.read_bytes(), original)
 
 
 @unittest.skipUnless((sesca.DEFAULT_SESCA_DIR / "scripts" / "SESCA_deconv.py").is_file(), "Local official SESCA package not installed")
