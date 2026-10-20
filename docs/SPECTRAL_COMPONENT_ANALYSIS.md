@@ -1,7 +1,7 @@
 # Spectral Component Analysis
 
 Analyze an Excel workbook on Windows using SVD, PCA, and optional non-negative
-MCR-ALS. See [the project README](README.md) for Python installation and setup.
+MCR-ALS. See [the project cheat sheet](../README.md) for Python installation and setup.
 
 ## Input workbook
 
