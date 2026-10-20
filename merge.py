@@ -25,7 +25,7 @@ DEFAULT_FOLDER = Path(
 )
 SPECTRAL_COLUMNS = ["wavelength_nm", "cd_mdeg", "ht_v", "absorbance"]
 CHANNEL_SHEETS = {"CD": "cd_mdeg", "HT": "ht_v", "Abs": "absorbance"}
-CONCENTRATION_COLUMNS = ["spectrum", "concentration_coefficient", "Ph", "short name"]
+CONCENTRATION_COLUMNS = ["spectrum", "concentration_coefficient", "pH", "short name"]
 
 
 def read_acquisition_datetime(file: Path) -> datetime:
@@ -217,7 +217,7 @@ def load_concentration_table(
             if column_count not in (2, 3, 4):
                 raise ValueError(
                     f"{concentration_file} must have two, three, or four tab-separated columns: "
-                    "spectrum name, concentration coefficient, optional Ph and short name"
+                    "spectrum name, concentration coefficient, optional pH and short name"
                 )
             rows = []
             for fields in csv.reader(stream, delimiter="\t"):
@@ -227,7 +227,7 @@ def load_concentration_table(
                 while fields and not fields[-1]:
                     fields.pop()
                 # Legacy tables use repeated tabs for alignment. Four-column
-                # rows also allow a blank Ph cell before the short name.
+                # rows also allow a blank pH cell before the short name.
                 if column_count < 4 or len(fields) > column_count or (len(fields) > 1 and not fields[1]):
                     fields = [field for field in fields if field]
                 if len(fields) > column_count:
@@ -264,10 +264,10 @@ def load_concentration_table(
         raise ValueError(f"No sample spectra listed in {concentration_file}.")
 
     inferred_ph = concentration_table["spectrum"].map(extract_ph_from_name).astype(float)
-    if "Ph" not in concentration_table:
-        concentration_table["Ph"] = inferred_ph.fillna(7.0)
+    if "pH" not in concentration_table:
+        concentration_table["pH"] = inferred_ph.fillna(7.0)
     else:
-        concentration_table["Ph"] = concentration_table["Ph"].fillna(
+        concentration_table["pH"] = concentration_table["pH"].fillna(
             inferred_ph
         ).fillna(7.0)
 

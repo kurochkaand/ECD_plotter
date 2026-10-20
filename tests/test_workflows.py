@@ -98,7 +98,7 @@ class MergeTests(unittest.TestCase):
         merge.merge_spectra(self.folder)
         table = pd.read_csv(self.folder / "concentration_table.txt", sep="\t")
         self.assertEqual(table.to_dict("list"), {
-            "spectrum": ["sample"], "concentration_coefficient": [1.0], "Ph": [7.0],
+            "spectrum": ["sample"], "concentration_coefficient": [1.0], "pH": [7.0],
             "short name": ["sample"],
         })
 
@@ -213,7 +213,7 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(table.index.tolist(), [first, second])
         self.assertEqual(table["short name"].tolist(), ["7.43", "5.77"])
         self.assertEqual(table["concentration_coefficient"].tolist(), [2, 4])
-        self.assertEqual(table["Ph"].astype(float).tolist(), [6.5, 6.8])
+        self.assertEqual(table["pH"].astype(float).tolist(), [6.5, 6.8])
         merge.merge_spectra(self.folder, subtract="H2O")
         self.assertEqual(table_file.read_bytes(), contents)
 
@@ -232,7 +232,7 @@ class MergeTests(unittest.TestCase):
                 contents = table_file.read_bytes()
                 table = merge.load_concentration_table(self.folder, names)
                 self.assertEqual(table["short name"].tolist(), ["old label", "outdated"])
-                self.assertEqual(table["Ph"].astype(float).tolist(), [7.43, 6.5])
+                self.assertEqual(table["pH"].astype(float).tolist(), [7.43, 6.5])
                 self.assertEqual(table["concentration_coefficient"].tolist(), [2, 3])
                 self.assertEqual(table_file.read_bytes(), contents)
 
@@ -261,7 +261,7 @@ class MergeTests(unittest.TestCase):
         merge.load_concentration_coefficients(self.folder, names)
         table = pd.read_csv(self.folder / "concentration_table.txt", sep="\t")
         self.assertEqual(table["spectrum"].tolist(), names)
-        self.assertEqual(table["Ph"].tolist(), [7.43, 7.9, 7.0])
+        self.assertEqual(table["pH"].tolist(), [7.43, 7.9, 7.0])
         self.assertEqual(table["concentration_coefficient"].tolist(), [1.0, 1.0, 1.0])
 
     def test_missing_ph_in_existing_tables_is_inferred(self):
@@ -274,7 +274,7 @@ class MergeTests(unittest.TestCase):
                 table_file.write_text(contents, encoding="utf-8")
                 original = table_file.read_bytes()
                 table = merge.load_concentration_table(self.folder, ["sample_pH5.77"])
-                self.assertEqual(table["Ph"].tolist(), [5.77])
+                self.assertEqual(table["pH"].tolist(), [5.77])
                 self.assertEqual(table["concentration_coefficient"].tolist(), [2])
                 self.assertEqual(table_file.read_bytes(), original)
 
@@ -288,7 +288,7 @@ class MergeTests(unittest.TestCase):
         names = ["sample_pH7.43", "H2O_1mm"]
         original = table_file.read_bytes()
         table = merge.load_concentration_table(self.folder, names)
-        self.assertEqual(table["Ph"].astype(float).tolist(), [6.8, 6.5])
+        self.assertEqual(table["pH"].astype(float).tolist(), [6.8, 6.5])
         self.assertEqual(table["concentration_coefficient"].tolist(), [2, 3])
         self.assertEqual(table_file.read_bytes(), original)
 
@@ -328,7 +328,7 @@ class MergeTests(unittest.TestCase):
                 table = merge.load_concentration_table(self.folder, names)
                 self.assertEqual(table["concentration_coefficient"].to_dict(), dict(zip(names, [3, 2])))
                 self.assertEqual(table.index.tolist(), names)
-                self.assertEqual(table["Ph"].astype(float).tolist(), expected_ph)
+                self.assertEqual(table["pH"].astype(float).tolist(), expected_ph)
                 self.assertEqual(table_file.read_bytes(), original)
 
     def test_duplicate_spectra_with_alignment_tabs_report_names(self):

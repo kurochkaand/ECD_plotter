@@ -52,7 +52,7 @@ When no concentration table exists, every CSV is treated as a sample except the
 reference selected by `--subtract`.
 
 On the first run, the script creates `concentration_table.txt` in the data folder
-with a concentration coefficient of `1.0` for each sample. `Ph` is extracted from
+with a concentration coefficient of `1.0` for each sample. `pH` is extracted from
 the filename: `pH7.43` gives `7.43`, and `pH7.9` gives `7.9`. A space after `pH`
 is accepted. Files without pH in the name, such as `H2O_1mm_185-300nm_4sc_20nm-1.csv`,
 use the default `7.0`.
@@ -85,7 +85,7 @@ short names freely, provided they remain unique and do not conflict with reserve
 headers or the reference's filename stem. Existing two- and three-column tables
 remain supported: missing short names and pH values use inferred defaults in
 memory, without adding columns or filling cells in the file. Coefficients must
-be finite and greater than zero. `Ph` is retained as metadata and is not used in
+be finite and greater than zero. `pH` is retained as metadata and is not used in
 the correction.
 
 The workbook is saved beside the data folder as `<folder-name>-combined.xlsx`:
