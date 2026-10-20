@@ -281,12 +281,59 @@ Each fit uses 10 random starts and up to 5000 optimization iterations per start;
 seed `0` makes reruns reproducible within the same software environment.
 The input passed to SESCA is **kMRE = MRE / 1000**, matching its basis library units.
 
+Add `--shared-scaling` to determine **one automatic scaling factor for the entire
+series**. Each eligible spectrum keeps its own structure composition. The
+compositions and common factor are optimized jointly; individual scaling factors
+are used only to initialize the fit, not averaged to produce the result.
+
+To supply your own common factor, give it as the optional value:
+
+```powershell
+.\.venv\Scripts\python.exe deconvolution.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14-Cd" --path-in-mm 1 --num-of-aa 20 --concentration-in-mM 0.1 --shared-scaling 1.33334 --plot
+```
+
+Here `1.33334` is held fixed for every fitted spectrum. Structure fractions are
+optimized with that factor; the factor itself is not optimized. It multiplies
+the observed MRE, so `scaled_observed_MRE = observed_MRE * 1.33334`. The value must
+be finite and greater than zero. Omitting the flag keeps independent scaling;
+`--shared-scaling` without a value keeps automatic shared scaling.
+
+The joint fit minimizes the sum of squared spectral residuals in the original
+unscaled intensities over all valid fitted points. It uses the selected SESCA
+basis and nonnegative coefficients, with every spectrum's coefficient sum
+constrained to the same value `q`. The shared scaling factor is `1 / q`, and
+each spectrum's fractions are its coefficients divided by `q`. This retains
+SESCA's least-squares criterion while enforcing a common scale. Every included
+wavelength contributes equally, so spectra with more valid fitted points
+contribute more to the combined objective. With a supplied factor, `q` is fixed
+to its reciprocal while the structure coefficients are fitted.
+
+The same `scaling_factor` is written to every fitted row of `SESCA_results`.
+Fractions, fitted curves, RMSD, and NRMSD are recalculated for the shared fit;
+`SESCA_fit` retains the same scaled-observation and residual conventions.
+`MRE_parameters` records `sesca_scaling_mode`, `sesca_shared_scaling_factor`,
+`sesca_shared_scaling_source` (`automatic` or `fixed`), the solver status, and
+the combined RMSD in unscaled kMRE. Skipped spectra do not participate and keep
+blank fractions and scaling factors. If all spectra are skipped, no automatic
+factor is reported; an explicitly supplied factor is still recorded in the
+parameters sheet.
+
+Shared scaling is implemented in this adapter with joint constrained least
+squares using [SciPy SLSQP](https://docs.scipy.org/doc/scipy/reference/optimize.minimize-slsqp.html).
+Without the flag, SESCA continues to determine a separate factor per spectrum.
+`--shared-scaling` can be combined with `--plot`, but not with `--mre-only`.
+
+```powershell
+.\.venv\Scripts\python.exe deconvolution.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14-Cd" --path-in-mm 1 --num-of-aa 20 --concentration-in-mM 0.1 --shared-scaling --plot
+```
+
 Optional controls:
 
 | Flag                         | Purpose                                                             | Default                                |
 | ---------------------------- | ------------------------------------------------------------------- | -------------------------------------- |
 | `--mre-only`                 | Convert without SESCA; remove any old SESCA output sheets.          | Run SESCA.                             |
 | `--plot`                     | Display structure percentages from the saved `SESCA_results` sheet. | No plot window.                        |
+| `--shared-scaling [FACTOR]`  | Use one common factor: optimize automatically without a value, or hold FACTOR fixed. | Separate factor per spectrum.       |
 | `--sesca-dir PATH`           | SESCA root containing `scripts/` and `libs/`.                       | `SESCA_HOME`, then local installation. |
 | `--sesca-basis NAME_OR_PATH` | Standalone basis name or basis file path.                           | `DS-dT`.                               |
 | `--sesca-min-nm VALUE`       | Lower fit wavelength bound.                                         | `190`.                                 |

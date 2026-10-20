@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import matplotlib
@@ -298,6 +299,184 @@ class SescaTests(unittest.TestCase):
             deconvolution.convert_to_mre(folder, path_in_mm=1, concentration_in_M=0.0001, num_of_aa=20, plot=True)
         self.assertEqual(output.read_bytes(), original)
 
+    def test_shared_scaling_with_no_eligible_spectra_has_no_factor(self):
+        result = sesca.fit_spectra(
+            ["excluded"], [[wave, None] for wave, _ in self.rows],
+            sesca.SescaOptions(directory=self.root, shared_scaling=True),
+        )
+        self.assertEqual(result.fits[0].status, "skipped")
+        self.assertIsNone(result.fits[0].scale)
+        metadata = dict(result.parameters)
+        self.assertEqual(metadata["sesca_scaling_mode"], "shared")
+        self.assertEqual(metadata["sesca_shared_fit_status"], "No eligible spectra")
+        self.assertNotIn("sesca_shared_scaling_factor", metadata)
+
+    def test_shared_solver_failure_preserves_workbook(self):
+        folder, output = self.write_combined()
+        original = output.read_bytes()
+        with patch.object(sesca, "minimize", return_value=SimpleNamespace(success=False, message="Test failure")):
+            with self.assertRaisesRegex(RuntimeError, "Shared-scaling fit failed"):
+                deconvolution.convert_to_mre(
+                    folder, path_in_mm=1, concentration_in_M=0.0001, num_of_aa=20,
+                    sesca_options=sesca.SescaOptions(directory=self.root, shared_scaling=True),
+                )
+        self.assertEqual(output.read_bytes(), original)
+
+    def test_shared_scaling_cannot_be_combined_with_mre_only(self):
+        folder, output = self.write_combined()
+        original = output.read_bytes()
+        arguments = [
+            "deconvolution.py", "--folder", str(folder), "--path-in-mm", "1",
+            "--num-of-aa", "20", "--concentration-in-mM", "0.1", "--mre-only", "--shared-scaling",
+        ]
+        with patch.object(sys, "argv", arguments), patch("sys.stderr", io.StringIO()) as stderr:
+            with self.assertRaises(SystemExit) as error:
+                deconvolution.main()
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn("--shared-scaling cannot be combined with --mre-only", stderr.getvalue())
+        self.assertEqual(output.read_bytes(), original)
+
+    def test_invalid_fixed_scaling_is_rejected_before_workbook_changes(self):
+        folder, output = self.write_combined()
+        original = output.read_bytes()
+        for value in ("0", "-1", "nan", "inf"):
+            with self.subTest(value=value):
+                arguments = [
+                    "deconvolution.py", "--folder", str(folder), "--path-in-mm", "1",
+                    "--num-of-aa", "20", "--concentration-in-mM", "0.1", "--shared-scaling", value,
+                ]
+                with patch.object(sys, "argv", arguments), patch("sys.stderr", io.StringIO()) as stderr:
+                    with self.assertRaises(SystemExit) as error:
+                        deconvolution.main()
+                self.assertEqual(error.exception.code, 2)
+                self.assertIn("finite and greater than zero", stderr.getvalue())
+                self.assertEqual(output.read_bytes(), original)
+                with self.assertRaisesRegex(ValueError, "finite and greater than zero"):
+                    sesca.fit_spectra(["sample"], self.rows, sesca.SescaOptions(directory=self.root, fixed_scaling=float(value)))
+
+    def test_explicit_fixed_factor_is_recorded_even_when_every_spectrum_is_skipped(self):
+        result = sesca.fit_spectra(
+            ["excluded"], [[wave, None] for wave, _ in self.rows],
+            sesca.SescaOptions(directory=self.root, fixed_scaling=1.33334),
+        )
+        self.assertEqual(result.fits[0].status, "skipped")
+        self.assertIsNone(result.fits[0].scale)
+        metadata = dict(result.parameters)
+        self.assertEqual(metadata["sesca_shared_scaling_source"], "fixed")
+        self.assertEqual(metadata["sesca_shared_scaling_factor"], 1.33334)
+
+    def test_cli_accepts_fixed_scaling_with_plot_and_writes_requested_factor(self):
+        folder, output = self.write_combined()
+        for factor in (1.33334, 1.0):
+            with self.subTest(factor=factor):
+                self.engine.Def_Args = []  # A real CLI invocation imports a fresh engine.
+                arguments = [
+                    "deconvolution.py", "--folder", str(folder), "--path-in-mm", "1",
+                    "--num-of-aa", "20", "--concentration-in-mM", "0.1", "--sesca-dir", str(self.root),
+                    "--shared-scaling", str(factor), "--plot",
+                ]
+                with patch.object(sys, "argv", arguments), patch.object(plt, "show") as show:
+                    self.assertEqual(deconvolution.main(), 0)
+                show.assert_called_once_with(block=True)
+                saved = load_workbook(output, data_only=True)
+                try:
+                    headers, row = list(saved["SESCA_results"].values)
+                    self.assertEqual(row[headers.index("scaling_factor")], factor)
+                    metadata = dict(list(saved["MRE_parameters"].values)[1:])
+                    self.assertEqual(metadata["sesca_shared_scaling_source"], "fixed")
+                    self.assertEqual(metadata["sesca_shared_scaling_factor"], factor)
+                    for curve in list(saved["SESCA_fit"].values)[1:]:
+                        self.assertAlmostEqual(curve[3], curve[2] * factor, places=8)
+                finally:
+                    saved.close()
+
+
+class SharedScalingTests(unittest.TestCase):
+    def make_inputs(self, gains=(2.0, 3.0), counts=(18, 18)):
+        # Repeated orthogonal classes give an independently solvable joint fit.
+        basis = np.tile(np.eye(3), (6, 1))
+        compositions = (np.asarray([0.2, 0.3, 0.5]), np.asarray([0.4, 0.35, 0.25]))
+        inputs = []
+        for index, (gain, points, fractions) in enumerate(zip(gains, counts, compositions)):
+            matrix = basis[:points]
+            fit = sesca.SpectrumFit(
+                f"sample {index}", "ok", fractions=fractions.tolist(),
+                wavelengths=(190 + 3 * np.arange(points)).tolist(),
+                observed_mre=(matrix @ fractions * gain * 1000).tolist(),
+                fitted_mre=(matrix @ fractions * 1000).tolist(), scale=1 / gain,
+            )
+            inputs.append((fit, matrix))
+        return inputs
+
+    def test_shared_factor_and_compositions_are_jointly_optimized(self):
+        inputs = self.make_inputs()
+        independent_average = np.mean([fit.scale for fit, _ in inputs])
+        metadata = dict(sesca.refine_shared_scaling(inputs))
+        # Equal point counts make the optimal common weight sum (2 + 3) / 2.
+        # Therefore the shared factor is 1 / 2.5 = 0.4, not mean(1/2, 1/3).
+        self.assertAlmostEqual(metadata["sesca_shared_scaling_factor"], 0.4, places=7)
+        self.assertGreater(abs(metadata["sesca_shared_scaling_factor"] - independent_average), 0.01)
+        expected = ([0.2266666667, 0.3066666667, 0.4666666667], [0.4133333333, 0.3533333333, 0.2333333333])
+        for (fit, _), fractions in zip(inputs, expected):
+            self.assertEqual(fit.scale, metadata["sesca_shared_scaling_factor"])
+            np.testing.assert_allclose(fit.fractions, fractions, atol=1e-7)
+            residual = np.asarray(fit.observed_mre) * fit.scale - np.asarray(fit.fitted_mre)
+            self.assertAlmostEqual(fit.rmsd_kmre, np.sqrt(np.mean(residual**2)) / 1000, places=12)
+            self.assertAlmostEqual(sum(fit.fractions), 1, places=12)
+        self.assertAlmostEqual(metadata["sesca_shared_fit_RMSD_kMRE_unscaled"], 1 / 6, places=7)
+
+    def test_manual_factor_is_held_fixed_and_compositions_are_refitted(self):
+        inputs = self.make_inputs()
+        metadata = dict(sesca.refine_shared_scaling(inputs, fixed_scale=0.5))
+        self.assertEqual(metadata["sesca_shared_scaling_factor"], 0.5)
+        self.assertEqual(metadata["sesca_shared_scaling_source"], "fixed")
+        expected = ([0.2, 0.3, 0.5], [0.4333333333, 0.3583333333, 0.2083333333])
+        for (fit, _), truth in zip(inputs, expected):
+            self.assertEqual(fit.scale, 0.5)
+            np.testing.assert_allclose(fit.fractions, truth, atol=1e-7)
+            self.assertAlmostEqual(sum(fit.fractions), 1.0, places=12)
+
+    def test_user_factor_is_kept_exactly_instead_of_optimized(self):
+        inputs = self.make_inputs()
+        metadata = dict(sesca.refine_shared_scaling(inputs, fixed_scale=1.33334))
+        self.assertEqual(metadata["sesca_shared_scaling_factor"], 1.33334)
+        for fit, _ in inputs:
+            self.assertEqual(fit.scale, 1.33334)
+            self.assertGreaterEqual(min(fit.fractions), 0)
+            self.assertAlmostEqual(sum(fit.fractions), 1.0, places=12)
+
+    def test_each_valid_wavelength_contributes_once_with_unequal_coverage(self):
+        inputs = self.make_inputs(counts=(18, 12))
+        metadata = dict(sesca.refine_shared_scaling(inputs))
+        # Six repeats of amplitude 2 and four repeats of amplitude 3: q = 2.4.
+        self.assertAlmostEqual(metadata["sesca_shared_scaling_factor"], 1 / 2.4, places=7)
+        self.assertEqual([len(fit.wavelengths) for fit, _ in inputs], [18, 12])
+
+    def test_exact_shared_scale_survives_large_and_small_amplitudes(self):
+        for gain in (2e-6, 2.0, 2e6):
+            with self.subTest(gain=gain):
+                inputs = self.make_inputs(gains=(gain, gain))
+                sesca.refine_shared_scaling(inputs)
+                for fit, _ in inputs:
+                    self.assertAlmostEqual(fit.scale * gain, 1.0, places=8)
+                    self.assertLess(fit.rmsd_kmre, 1e-8)
+
+    def test_single_eligible_spectrum_and_nonnegative_boundary_fractions(self):
+        inputs = self.make_inputs()[:1]
+        fit, matrix = inputs[0]
+        fit.fractions = [1.0, 0.0, 0.0]
+        fit.observed_mre = (matrix[:, 0] * 2000).tolist()
+        sesca.refine_shared_scaling(inputs)
+        self.assertAlmostEqual(fit.scale, 0.5, places=8)
+        np.testing.assert_allclose(fit.fractions, [1, 0, 0], atol=1e-8)
+
+    def test_zero_common_weight_sum_is_rejected(self):
+        inputs = self.make_inputs()
+        for fit, _ in inputs:
+            fit.observed_mre = (-np.abs(fit.observed_mre)).tolist()
+        with self.assertRaisesRegex(RuntimeError, "valid positive scaling"):
+            sesca.refine_shared_scaling(inputs)
+
 
 @unittest.skipUnless((sesca.DEFAULT_SESCA_DIR / "scripts" / "SESCA_deconv.py").is_file(), "Local official SESCA package not installed")
 class RealSescaTests(unittest.TestCase):
@@ -318,6 +497,71 @@ class RealSescaTests(unittest.TestCase):
         self.assertLess(fit.rmsd_kmre, 0.002)
         repeated = sesca.fit_spectra(["known mixture"], rows, self.options).fits[0]
         np.testing.assert_allclose(fit.fractions, repeated.fractions, rtol=0, atol=0)
+
+    def test_shared_fit_recovers_real_basis_mixtures_with_gaps_and_skips(self):
+        compositions = np.asarray([[0.2, 0.3, 0.5], [0.55, 0.1, 0.35], [0.15, 0.8, 0.05]])
+        observed = self.basis[:, 1:] @ compositions.T * 2000
+        rows = [[wave, values[0], None if index % 5 == 0 else values[1], values[2], None]
+                for index, (wave, values) in enumerate(zip(self.basis[:, 0], observed))]
+        result = sesca.fit_spectra(
+            ["first", "gapped", "third", "excluded"], rows, sesca.SescaOptions(shared_scaling=True),
+        )
+        self.assertEqual([fit.status for fit in result.fits], ["ok", "ok", "ok", "skipped"])
+        scale = result.fits[0].scale
+        self.assertAlmostEqual(scale, 0.5, places=5)
+        for fit, truth in zip(result.fits, compositions):
+            self.assertEqual(fit.scale, scale)
+            np.testing.assert_allclose(fit.fractions, truth, atol=1e-5)
+            self.assertLess(fit.rmsd_kmre, 1e-4)
+        self.assertEqual(len(result.fits[1].wavelengths), sum(index % 5 != 0 for index in range(len(rows))))
+        self.assertIsNone(result.fits[-1].scale)
+
+    def test_fixed_shared_factor_recovers_real_basis_mixtures(self):
+        compositions = np.asarray([[0.25, 0.35, 0.40], [0.6, 0.2, 0.2]])
+        factor = 1.33334
+        observed = self.basis[:, 1:] @ compositions.T * 1000 / factor
+        rows = [[wave, *values] for wave, values in zip(self.basis[:, 0], observed)]
+        result = sesca.fit_spectra(["first", "second"], rows, sesca.SescaOptions(fixed_scaling=factor))
+        for fit, truth in zip(result.fits, compositions):
+            self.assertEqual(fit.scale, factor)
+            np.testing.assert_allclose(fit.fractions, truth, atol=1e-5)
+            self.assertLess(fit.rmsd_kmre, 1e-4)
+
+    def test_cli_shared_scaling_is_saved_for_all_series_and_in_parameters(self):
+        with tempfile.TemporaryDirectory(prefix="SESCA shared CLI ") as temporary:
+            folder = Path(temporary).resolve() / "series"
+            folder.mkdir()
+            output = folder.parent / "series-combined.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "CD_subtr"
+            sheet.append(["wavelength_nm", "first", "second", "zero", "first", "second"])
+            second = self.basis[:, 1:] @ [0.5, 0.2, 0.3] * 1000
+            for wave, first_value, second_value in zip(self.basis[:, 0], self.observed, second):
+                # Twofold amplitude error; path=1, concentration=0.0001 M, residues=20.
+                sheet.append([wave, first_value * 0.004, second_value * 0.004, 0, first_value * 0.004, second_value * 0.004])
+            workbook.save(output)
+            workbook.close()
+            result = subprocess.run(
+                [sys.executable, str(PROJECT_ROOT / "deconvolution.py"), "--folder", str(folder),
+                 "--path-in-mm", "1", "--num-of-aa", "20", "--concentration-in-mM", "0.1", "--shared-scaling"],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            saved = load_workbook(output, data_only=True)
+            try:
+                data = list(saved["SESCA_results"].values)
+                scale_column = data[0].index("scaling_factor")
+                scales = [row[scale_column] for row in data[1:]]
+                self.assertEqual(scales[0], scales[1])
+                self.assertAlmostEqual(scales[0], 0.5, places=5)
+                metadata = dict(list(saved["MRE_parameters"].values)[1:])
+                self.assertEqual(metadata["sesca_scaling_mode"], "shared")
+                self.assertEqual(metadata["sesca_shared_scaling_factor"], scales[0])
+                for row in list(saved["SESCA_fit"].values)[1:]:
+                    self.assertAlmostEqual(row[3], row[2] * scales[0], places=7)
+            finally:
+                saved.close()
 
     def test_default_cli_runs_real_sesca_and_writes_full_precision_fits(self):
         with tempfile.TemporaryDirectory(prefix="SESCA CLI ") as temporary:

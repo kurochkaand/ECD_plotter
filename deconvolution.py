@@ -244,13 +244,24 @@ def main() -> int:
     parser.add_argument("--sesca-max-nm", type=float, default=250.0, help="Fit range upper bound (default: 250 nm).")
     parser.add_argument("--sesca-repeats", type=int, default=10, help="Number of fit restarts (default: 10).")
     parser.add_argument("--sesca-seed", type=int, default=0, help="Random seed for repeatable fits (default: 0).")
+    parser.add_argument(
+        "--shared-scaling", nargs="?", type=float, const=True, default=False, metavar="FACTOR",
+        help="Share one scaling factor: optimize it automatically without a value, "
+             "or hold a positive FACTOR fixed for all fitted spectra.",
+    )
     args = parser.parse_args()
+    fixed_scaling = args.shared_scaling if not isinstance(args.shared_scaling, bool) else None
+    if fixed_scaling is not None and (not isfinite(fixed_scaling) or fixed_scaling <= 0):
+        parser.error("--shared-scaling FACTOR must be finite and greater than zero.")
+    if args.mre_only and args.shared_scaling is not False:
+        parser.error("--shared-scaling cannot be combined with --mre-only.")
 
     try:
         sesca_options = None if args.mre_only else SescaOptions(
             directory=args.sesca_dir, basis=args.sesca_basis,
             min_nm=args.sesca_min_nm, max_nm=args.sesca_max_nm,
             repeats=args.sesca_repeats, seed=args.sesca_seed,
+            shared_scaling=args.shared_scaling is not False, fixed_scaling=fixed_scaling,
         )
         output_file = convert_to_mre(
             args.folder, path_in_mm=args.path_in_mm, num_of_aa=args.num_of_aa,

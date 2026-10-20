@@ -18,7 +18,7 @@ import numpy as np
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
-from scipy.optimize import OptimizeWarning
+from scipy.optimize import Bounds, LinearConstraint, OptimizeWarning, minimize
 
 
 SESCA_URL = "https://www.mpinat.mpg.de/sesca"
@@ -35,6 +35,8 @@ class SescaOptions:
     max_nm: float = 250.0
     repeats: int = 10
     seed: int = 0
+    shared_scaling: bool = False
+    fixed_scaling: float | None = None
 
 
 @dataclass
@@ -66,6 +68,10 @@ def resolve_sesca(options: SescaOptions) -> tuple[Path, Path]:
         raise ValueError("SESCA repeats must be a positive integer.")
     if isinstance(options.seed, bool) or not isinstance(options.seed, int) or not 0 <= options.seed < 2**32:
         raise ValueError("SESCA seed must be an integer between 0 and 4294967295.")
+    if options.fixed_scaling is not None and (
+        isinstance(options.fixed_scaling, bool) or not np.isfinite(options.fixed_scaling) or options.fixed_scaling <= 0
+    ):
+        raise ValueError("The fixed shared scaling factor must be finite and greater than zero.")
     directory = Path(options.directory or os.environ.get("SESCA_HOME") or DEFAULT_SESCA_DIR).resolve()
     if not (directory / "scripts" / "SESCA_deconv.py").is_file():
         raise FileNotFoundError(
@@ -123,6 +129,107 @@ def load_engine(directory: Path):
     return module
 
 
+def refine_shared_scaling(
+    inputs: list[tuple[SpectrumFit, np.ndarray]], fixed_scale: float | None = None,
+) -> list[tuple[str, str | int | float]]:
+    """Jointly minimize unscaled spectral SSE with equal sums of basis weights.
+
+    SESCA fits observed = basis @ weights, then reports fractions = weights / q
+    and scaling_factor = 1 / q, where q is the sum of weights. Here every spectrum
+    has its own nonnegative weights but shares q. This is a convex least-squares
+    problem with linear equality constraints, not an average of individual fits.
+    A supplied scaling factor fixes q = 1 / fixed_scale during optimization.
+    """
+    if not inputs:
+        parameters = [
+            ("sesca_shared_scaling_source", "fixed" if fixed_scale is not None else "automatic"),
+            ("sesca_shared_fit_status", "No eligible spectra"),
+        ]
+        if fixed_scale is not None:
+            parameters.append(("sesca_shared_scaling_factor", fixed_scale))
+        return parameters
+    count, classes = len(inputs), inputs[0][1].shape[1]
+    points = sum(len(fit.wavelengths) for fit, _ in inputs)
+    dimensions = 1 + count * classes
+    design = np.zeros((points, dimensions))
+    target = np.empty(points)
+    equality = np.zeros((count, dimensions))
+    initial = np.empty(dimensions)
+    initial[0] = 1.0
+    # Work near unit-sized weights even when measured intensity is misnormalized.
+    # This reference only conditions the problem; the final factor is optimized.
+    reference_sum = 1.0 / (fixed_scale if fixed_scale is not None else float(np.median([fit.scale for fit, _ in inputs])))
+    if not np.isfinite(reference_sum) or reference_sum <= 0:
+        raise RuntimeError("Cannot initialize a finite positive shared coefficient sum.")
+    offset = 0
+    for index, (fit, matrix) in enumerate(inputs):
+        columns = slice(1 + index * classes, 1 + (index + 1) * classes)
+        rows = slice(offset, offset + len(fit.wavelengths))
+        design[rows, columns] = matrix
+        target[rows] = np.asarray(fit.observed_mre) / 1000.0 / reference_sum
+        equality[index, 0] = -1.0
+        equality[index, columns] = 1.0
+        initial[columns] = fit.fractions
+        offset = rows.stop
+    magnitude = max(float(np.max(np.abs(design))), float(np.max(np.abs(target))))
+    design /= magnitude
+    target /= magnitude
+
+    def objective(values):
+        residual = design @ values - target
+        return float(residual @ residual)
+
+    def gradient(values):
+        return 2.0 * design.T @ (design @ values - target)
+
+    lower, upper = np.zeros(dimensions), np.full(dimensions, np.inf)
+    if fixed_scale is not None:
+        lower[0] = upper[0] = 1.0
+    result = minimize(
+        objective, initial, jac=gradient, method="SLSQP",
+        bounds=Bounds(lower, upper),
+        constraints=LinearConstraint(equality, 0.0, 0.0),
+        options={"ftol": 1e-14, "maxiter": 5000},
+    )
+    if not result.success:
+        raise RuntimeError(f"Shared-scaling fit failed: {result.message}")
+    if (not np.isfinite(result.x).all() or np.any(result.x < -1e-9)
+            or not np.allclose(equality @ result.x, 0.0, atol=1e-8)
+            or result.x[0] <= 1e-12):
+        raise RuntimeError("Shared-scaling fit did not produce valid positive scaling and nonnegative weights.")
+    shared_scale = float(fixed_scale) if fixed_scale is not None else 1.0 / (reference_sum * float(result.x[0]))
+    if not np.isfinite(shared_scale) or shared_scale <= 0:
+        raise RuntimeError("Shared-scaling fit did not produce a finite positive scaling factor.")
+
+    unscaled_sse = 0.0
+    for index, (fit, matrix) in enumerate(inputs):
+        weights = result.x[1 + index * classes:1 + (index + 1) * classes]
+        fractions = np.maximum(weights, 0.0)
+        total = float(fractions.sum())
+        if total <= 0 or not np.isclose(total, result.x[0], rtol=1e-7, atol=1e-10):
+            raise RuntimeError("Shared-scaling fit returned inconsistent coefficient sums.")
+        fractions /= total  # Remove only numerical equality/bound roundoff.
+        predicted = matrix @ fractions
+        observed = np.asarray(fit.observed_mre) / 1000.0
+        scaled = shared_scale * observed
+        residual = scaled - predicted
+        fit.fractions = fractions.tolist()
+        fit.fitted_mre = (predicted * 1000.0).tolist()
+        fit.scale = shared_scale
+        fit.rmsd_kmre = float(np.sqrt(np.mean(residual**2)))
+        fit.nrmsd = fit.rmsd_kmre / float(np.sqrt(np.mean(scaled**2)))
+        unscaled_sse += float(np.sum((observed - predicted / shared_scale)**2))
+    return [
+        ("sesca_shared_scaling_factor", shared_scale),
+        ("sesca_shared_scaling_source", "fixed" if fixed_scale is not None else "automatic"),
+        ("sesca_shared_fit_status", "Converged"),
+        ("sesca_shared_fit_method", "Joint constrained least squares (SLSQP)"),
+        ("sesca_shared_fit_iterations", int(result.nit)),
+        ("sesca_shared_fit_objective", "Sum of squared (observed_kMRE - fitted_kMRE / scaling_factor) residuals"),
+        ("sesca_shared_fit_RMSD_kMRE_unscaled", float(np.sqrt(unscaled_sse / points))),
+    ]
+
+
 def fit_spectra(
     names: list[str], mre_rows: list[list[float | None]], options: SescaOptions
 ) -> SescaAnalysis:
@@ -143,6 +250,7 @@ def fit_spectra(
             matches.append((int(positions[0]), basis_row))
 
     fits = []
+    shared_inputs = []
     with tempfile.TemporaryDirectory(prefix="ECD SESCA ") as temporary:
         spectrum_file = Path(temporary) / "spectrum.dat"
         for column, name in enumerate(names, start=1):
@@ -195,13 +303,17 @@ def fit_spectra(
             expected_rmsd = float(np.sqrt(np.mean(((observed * scale - fitted) / 1000.0) ** 2)))
             if not np.isclose(rmsd, expected_rmsd, rtol=1e-5, atol=1e-7):
                 raise RuntimeError(f"SESCA fitted spectrum and reported RMSD disagree for {name!r}.")
-            fits.append(SpectrumFit(
+            fit = SpectrumFit(
                 name, "ok", fractions=fractions.tolist(), wavelengths=fit_waves.tolist(),
                 observed_mre=observed.tolist(), fitted_mre=fitted.tolist(),
                 scale=scale, rmsd_kmre=rmsd, nrmsd=nrmsd,
-            ))
+            )
+            fits.append(fit)
+            shared_inputs.append((fit, matrix))
+    shared_scaling = options.shared_scaling or options.fixed_scaling is not None
+    shared_parameters = refine_shared_scaling(shared_inputs, options.fixed_scaling) if shared_scaling else []
     return SescaAnalysis(classes, fits, [
-        ("secondary_structure_analysis", "SESCA_deconv"),
+        ("secondary_structure_analysis", "SESCA basis with shared scaling" if shared_scaling else "SESCA_deconv"),
         ("sesca_directory", str(directory)),
         ("sesca_source", SESCA_URL),
         ("sesca_basis_file", str(basis_file)),
@@ -211,8 +323,10 @@ def fit_spectra(
         ("sesca_repeats", options.repeats), ("sesca_max_iterations", 5000),
         ("sesca_seed", options.seed), ("sesca_input_units", "kMRE = MRE / 1000"),
         ("sesca_rescaling", "Enabled; scaled_observed_MRE = observed_MRE * scaling_factor"),
+        ("sesca_scaling_mode", "shared" if shared_scaling else "per-spectrum"),
         ("sesca_fitted_spectra", sum(fit.status == "ok" for fit in fits)),
         ("sesca_skipped_spectra", sum(fit.status == "skipped" for fit in fits)),
+        *shared_parameters,
     ])
 
 
