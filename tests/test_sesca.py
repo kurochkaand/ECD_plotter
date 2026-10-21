@@ -88,6 +88,7 @@ class SescaTests(unittest.TestCase):
             raw = value * 0.002  # 1 mm * 0.0001 M * 20 residues
             source.append([wave, raw, 0, raw])
         workbook.create_sheet("Notes")["A1"] = "Preserve"
+        merge.write_mre_spectra(workbook, path_in_mm=1, concentration_in_M=0.0001, num_of_aa=20)
         workbook.save(output)
         workbook.close()
         return folder, output
@@ -126,15 +127,14 @@ class SescaTests(unittest.TestCase):
             sesca.fit_spectra(["sample"], self.rows + [self.rows[0]], self.options)
 
     def test_missing_installation_and_basis_have_actionable_errors(self):
-        with self.assertRaisesRegex(FileNotFoundError, "--sesca-dir.*--mre-only"):
+        with self.assertRaisesRegex(FileNotFoundError, "--sesca-dir.*merge.py"):
             sesca.fit_spectra(["sample"], self.rows, sesca.SescaOptions(directory=self.root / "missing"))
         with self.assertRaisesRegex(FileNotFoundError, "--sesca-basis"):
             sesca.fit_spectra(["sample"], self.rows, sesca.SescaOptions(directory=self.root, basis="missing"))
 
-    def test_workbook_outputs_and_mre_only_reruns_remove_stale_fits(self):
+    def test_workbook_outputs_and_reruns_preserve_mre_and_replace_fitting_metadata(self):
         folder, output = self.write_combined()
-        parameters = dict(path_in_mm=1, concentration_in_M=0.0001, num_of_aa=20)
-        deconvolution.convert_to_mre(folder, **parameters, sesca_options=self.options)
+        deconvolution.deconvolve_spectra(folder, sesca_options=self.options)
         workbook = load_workbook(output)
         self.addCleanup(workbook.close)
         self.assertEqual(workbook["Notes"]["A1"].value, "Preserve")
@@ -145,19 +145,45 @@ class SescaTests(unittest.TestCase):
         self.assertAlmostEqual(first[2], first[3])
         self.assertAlmostEqual(first[3], first[4])
         self.assertAlmostEqual(first[5], 0, places=7)
-        deconvolution.convert_to_mre(folder, **parameters)
+        original_mre = list(workbook["MRE"].values)
+        original_parameters = dict(list(workbook["MRE_parameters"].values)[1:])
+        self.engine.Def_Args = []  # A real invocation imports a fresh engine.
+        deconvolution.deconvolve_spectra(
+            folder, sesca_options=sesca.SescaOptions(directory=self.root, fixed_scaling=1.0),
+        )
+        self.engine.Def_Args = []
+        deconvolution.deconvolve_spectra(folder, sesca_options=self.options)
         rerun = load_workbook(output)
         self.addCleanup(rerun.close)
-        self.assertNotIn("SESCA_results", rerun.sheetnames)
-        self.assertNotIn("SESCA_fit", rerun.sheetnames)
+        self.assertEqual(rerun.sheetnames.count("SESCA_results"), 1)
+        self.assertEqual(rerun.sheetnames.count("SESCA_fit"), 1)
+        self.assertEqual(list(rerun["MRE"].values), original_mre)
+        rows = list(rerun["MRE_parameters"].values)[1:]
+        metadata = dict(rows)
+        self.assertEqual(len(rows), len(metadata))
+        self.assertNotIn("sesca_shared_scaling_factor", metadata)
+        for key, value in original_parameters.items():
+            if not key.startswith("sesca_") and key != "secondary_structure_analysis":
+                self.assertEqual(metadata[key], value)
+
+    def test_failed_replace_preserves_mre_and_existing_fits(self):
+        folder, output = self.write_combined()
+        deconvolution.deconvolve_spectra(folder, sesca_options=self.options)
+        original = output.read_bytes()
+        self.engine.Def_Args = []
+        with patch.object(deconvolution.os, "replace", side_effect=PermissionError("Workbook is open")):
+            with self.assertRaises(PermissionError):
+                deconvolution.deconvolve_spectra(folder, sesca_options=self.options)
+        self.assertEqual(output.read_bytes(), original)
+        self.assertEqual(list(output.parent.glob(".*-combined-*.xlsx")), [])
 
     def test_engine_failure_preserves_original_workbook(self):
         folder, output = self.write_combined()
         original = output.read_bytes()
         with patch.object(self.engine, "Deconv_Main", side_effect=SystemExit(2)):
             with self.assertRaisesRegex(RuntimeError, "SESCA failed for 'sample'"):
-                deconvolution.convert_to_mre(
-                    folder, path_in_mm=1, concentration_in_M=0.0001, num_of_aa=20,
+                deconvolution.deconvolve_spectra(
+                    folder,
                     sesca_options=self.options,
                 )
         self.assertEqual(output.read_bytes(), original)
@@ -174,8 +200,8 @@ class SescaTests(unittest.TestCase):
     def test_plot_is_disabled_by_default(self):
         folder, _ = self.write_combined()
         with patch.object(deconvolution, "plot_sesca_results") as plot:
-            deconvolution.convert_to_mre(
-                folder, path_in_mm=1, concentration_in_M=0.0001, num_of_aa=20,
+            deconvolution.deconvolve_spectra(
+                folder,
                 sesca_options=self.options,
             )
         plot.assert_not_called()
@@ -230,8 +256,7 @@ class SescaTests(unittest.TestCase):
             np.testing.assert_allclose([group[0].get_width() for group in bars], [20, 30, 50])
 
         arguments = [
-            "deconvolution.py", "--folder", str(folder), "--path-in-mm", "1",
-            "--num-of-aa", "20", "--concentration-in-mM", "0.1",
+            "deconvolution.py", "--folder", str(folder),
             "--sesca-dir", str(self.root), "--plot",
         ]
         with patch.object(sys, "argv", arguments), patch.object(plt, "show", side_effect=inspect_saved_results) as show:
@@ -254,12 +279,15 @@ class SescaTests(unittest.TestCase):
             )
         table_file = folder / "concentration_table.txt"
         table_file.write_text(
-            "spectrum\tconcentration_coefficient\tPh\tshort name\n"
-            f"{names[0]}\t1\t7\tCustom first\n{names[1]}\t1\t7\tCustom second\n",
+            "pathlength_in_mm = 1\nnumber_of_amino_acids = 20\n\n"
+            "spectrum\tconcentration_in_mM\tPh\tshort name\n"
+            f"{names[0]}\t0.1\t7\tCustom first\n{names[1]}\t0.1\t7\tCustom second\n",
             encoding="utf-8",
         )
         original_table = table_file.read_bytes()
-        output = merge.merge_spectra(folder, subtract="H2O")
+        output = merge.merge_spectra(
+            folder, subtract="H2O",
+        )
 
         def inspect_chart(*args, **kwargs):
             self.assertEqual(
@@ -268,8 +296,8 @@ class SescaTests(unittest.TestCase):
             )
 
         with patch.object(plt, "show", side_effect=inspect_chart) as show:
-            deconvolution.convert_to_mre(
-                folder, path_in_mm=1, concentration_in_M=0.0001, num_of_aa=20,
+            deconvolution.deconvolve_spectra(
+                folder,
                 sesca_options=self.options, plot=True,
             )
         show.assert_called_once_with(block=True)
@@ -300,12 +328,24 @@ class SescaTests(unittest.TestCase):
         show.assert_not_called()
         self.assertIn("No fitted spectra", stdout.getvalue())
 
-    def test_plot_with_mre_only_does_not_modify_workbook(self):
+    def test_fitting_uses_saved_mre_without_reading_or_converting_cd_again(self):
         folder, output = self.write_combined()
-        original = output.read_bytes()
-        with self.assertRaisesRegex(ValueError, "--mre-only"):
-            deconvolution.convert_to_mre(folder, path_in_mm=1, concentration_in_M=0.0001, num_of_aa=20, plot=True)
-        self.assertEqual(output.read_bytes(), original)
+        workbook = load_workbook(output)
+        # An edited MRE is the fitting input, even when the corrected CD sheet is absent.
+        del workbook["CD_subtr"]
+        workbook["MRE"]["B2"] = 12345.0
+        workbook["MRE"]["B3"] = None
+        workbook.save(output)
+        workbook.close()
+        deconvolution.deconvolve_spectra(folder, sesca_options=self.options)
+        self.assertEqual(self.engine.inputs[0][0, 1], 12.345)
+        self.assertNotIn(self.basis[1, 0], self.engine.inputs[0][:, 0])
+        saved = load_workbook(output)
+        try:
+            self.assertEqual(saved["MRE"]["B2"].value, 12345.0)
+            self.assertIsNone(saved["MRE"]["B3"].value)
+        finally:
+            saved.close()
 
     def test_shared_scaling_with_no_eligible_spectra_has_no_factor(self):
         result = sesca.fit_spectra(
@@ -324,24 +364,10 @@ class SescaTests(unittest.TestCase):
         original = output.read_bytes()
         with patch.object(sesca, "minimize", return_value=SimpleNamespace(success=False, message="Test failure")):
             with self.assertRaisesRegex(RuntimeError, "Shared-scaling fit failed"):
-                deconvolution.convert_to_mre(
-                    folder, path_in_mm=1, concentration_in_M=0.0001, num_of_aa=20,
+                deconvolution.deconvolve_spectra(
+                    folder,
                     sesca_options=sesca.SescaOptions(directory=self.root, shared_scaling=True),
                 )
-        self.assertEqual(output.read_bytes(), original)
-
-    def test_shared_scaling_cannot_be_combined_with_mre_only(self):
-        folder, output = self.write_combined()
-        original = output.read_bytes()
-        arguments = [
-            "deconvolution.py", "--folder", str(folder), "--path-in-mm", "1",
-            "--num-of-aa", "20", "--concentration-in-mM", "0.1", "--mre-only", "--shared-scaling",
-        ]
-        with patch.object(sys, "argv", arguments), patch("sys.stderr", io.StringIO()) as stderr:
-            with self.assertRaises(SystemExit) as error:
-                deconvolution.main()
-        self.assertEqual(error.exception.code, 2)
-        self.assertIn("--shared-scaling cannot be combined with --mre-only", stderr.getvalue())
         self.assertEqual(output.read_bytes(), original)
 
     def test_invalid_fixed_scaling_is_rejected_before_workbook_changes(self):
@@ -350,8 +376,7 @@ class SescaTests(unittest.TestCase):
         for value in ("0", "-1", "nan", "inf"):
             with self.subTest(value=value):
                 arguments = [
-                    "deconvolution.py", "--folder", str(folder), "--path-in-mm", "1",
-                    "--num-of-aa", "20", "--concentration-in-mM", "0.1", "--shared-scaling", value,
+                    "deconvolution.py", "--folder", str(folder), "--shared-scaling", value,
                 ]
                 with patch.object(sys, "argv", arguments), patch("sys.stderr", io.StringIO()) as stderr:
                     with self.assertRaises(SystemExit) as error:
@@ -379,8 +404,7 @@ class SescaTests(unittest.TestCase):
             with self.subTest(factor=factor):
                 self.engine.Def_Args = []  # A real CLI invocation imports a fresh engine.
                 arguments = [
-                    "deconvolution.py", "--folder", str(folder), "--path-in-mm", "1",
-                    "--num-of-aa", "20", "--concentration-in-mM", "0.1", "--sesca-dir", str(self.root),
+                    "deconvolution.py", "--folder", str(folder), "--sesca-dir", str(self.root),
                     "--shared-scaling", str(factor), "--plot",
                 ]
                 with patch.object(sys, "argv", arguments), patch.object(plt, "show") as show:
@@ -548,11 +572,12 @@ class RealSescaTests(unittest.TestCase):
             for wave, first_value, second_value in zip(self.basis[:, 0], self.observed, second):
                 # Twofold amplitude error; path=1, concentration=0.0001 M, residues=20.
                 sheet.append([wave, first_value * 0.004, second_value * 0.004, 0, first_value * 0.004, second_value * 0.004])
+            merge.write_mre_spectra(workbook, path_in_mm=1, concentration_in_M=0.0001, num_of_aa=20)
             workbook.save(output)
             workbook.close()
             result = subprocess.run(
                 [sys.executable, str(PROJECT_ROOT / "deconvolution.py"), "--folder", str(folder),
-                 "--path-in-mm", "1", "--num-of-aa", "20", "--concentration-in-mM", "0.1", "--shared-scaling"],
+                 "--shared-scaling"],
                 capture_output=True, text=True, check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -582,11 +607,11 @@ class RealSescaTests(unittest.TestCase):
             sheet.append(["wavelength_nm", "peptide", "zero", "peptide"])
             for wave, value in zip(self.basis[:, 0], self.observed):
                 sheet.append([wave, value * 0.002, 0, value * 0.002])
+            merge.write_mre_spectra(workbook, path_in_mm=1, concentration_in_M=0.0001, num_of_aa=20)
             workbook.save(output)
             workbook.close()
             result = subprocess.run(
-                [sys.executable, str(PROJECT_ROOT / "deconvolution.py"), "--folder", str(folder),
-                 "--path-in-mm", "1", "--num-of-aa", "20", "--concentration-in-mM", "0.1"],
+                [sys.executable, str(PROJECT_ROOT / "deconvolution.py"), "--folder", str(folder)],
                 capture_output=True, text=True, check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)

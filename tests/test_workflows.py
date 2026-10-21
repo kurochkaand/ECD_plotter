@@ -22,6 +22,7 @@ import spectral_component_analysis as analysis
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MRE_SETTINGS = "pathlength_in_mm = 1\nnumber_of_amino_acids = 1\n\n"
 
 
 def quadratic_window_fit(values, window):
@@ -63,28 +64,28 @@ class MergeTests(unittest.TestCase):
             encoding="latin-1",
         )
 
-    def write_coefficients(self, rows):
+    def write_concentrations(self, rows):
         (self.folder / "concentration_table.txt").write_text(
-            "spectrum\tconcentration_coefficient\n" + rows,
+            MRE_SETTINGS + "spectrum\tconcentration_in_mM\n" + rows,
             encoding="utf-8",
         )
 
     def test_workbook_preserves_raw_values_and_normalizes_without_subtraction(self):
-        self.write_coefficients("sample\t2\n")
+        self.write_concentrations("sample\t2\n")
         output = merge.merge_spectra(self.folder)
         self.assertEqual(output, self.folder.parent / "instrument data-combined.xlsx")
         with pd.ExcelFile(output) as workbook:
-            self.assertEqual(workbook.sheet_names, ["CD", "HT", "Abs", "CD_subtr", "Abs_subtr"])
+            self.assertEqual(workbook.sheet_names, ["CD", "HT", "CD_subtr", "MRE", "MRE_parameters", "Epsilon"])
             cd = pd.read_excel(workbook, sheet_name="CD")
             ht = pd.read_excel(workbook, sheet_name="HT")
-            absorbance = pd.read_excel(workbook, sheet_name="Abs")
+            epsilon = pd.read_excel(workbook, sheet_name="Epsilon")
             summary = pd.read_excel(workbook, sheet_name="CD_subtr", header=None)
-        for channel in (cd, ht, absorbance):
+        for channel in (cd, ht, epsilon):
             self.assertEqual(channel.columns.tolist(), ["wavelength_nm", "sample"])
             self.assertEqual(channel["wavelength_nm"].tolist(), [200, 201, 202])
         self.assertEqual(cd["sample"].tolist(), [5, 8, 11])
         self.assertEqual(ht["sample"].tolist(), [500, 500, 500])
-        self.assertEqual(absorbance["sample"].tolist(), [0.25, 0.25, 0.25])
+        self.assertEqual(epsilon["sample"].tolist(), [1250, 1250, 1250])
         self.assertEqual(
             summary.iloc[0].tolist(),
             ["wavelength_nm", "sample", "zero", "sample"],
@@ -95,18 +96,21 @@ class MergeTests(unittest.TestCase):
         )
 
     def test_first_run_creates_default_concentration_table(self):
-        merge.merge_spectra(self.folder)
-        table = pd.read_csv(self.folder / "concentration_table.txt", sep="\t")
+        output = merge.merge_spectra(self.folder)
+        table_file = self.folder / "concentration_table.txt"
+        self.assertTrue(table_file.read_text(encoding="utf-8").startswith(MRE_SETTINGS))
+        table = pd.read_csv(table_file, sep="\t", skiprows=3)
         self.assertEqual(table.to_dict("list"), {
-            "spectrum": ["sample"], "concentration_coefficient": [1.0], "pH": [7.0],
+            "spectrum": ["sample"], "concentration_in_mM": [1.0], "pH": [7.0],
             "short name": ["sample"],
         })
+        self.assertEqual(pd.read_excel(output, sheet_name="MRE")["sample"].tolist(), [5000, 8000, 11000])
 
     def test_new_table_omits_reference_and_deleting_table_recreates_defaults(self):
         self.write_spectrum("H2O_reference", [1, 2, 3])
         merge.merge_spectra(self.folder, subtract="H2O")
         table_file = self.folder / "concentration_table.txt"
-        self.assertEqual(pd.read_csv(table_file, sep="\t")["spectrum"].tolist(), ["sample"])
+        self.assertEqual(pd.read_csv(table_file, sep="\t", skiprows=3)["spectrum"].tolist(), ["sample"])
         original = table_file.read_bytes()
 
         self.write_spectrum("new sample", [4, 6, 8], time="19:00:00")
@@ -117,16 +121,16 @@ class MergeTests(unittest.TestCase):
 
         table_file.unlink()
         merge.merge_spectra(self.folder, subtract="H2O")
-        table = pd.read_csv(table_file, sep="\t")
+        table = pd.read_csv(table_file, sep="\t", skiprows=3)
         self.assertEqual(table["spectrum"].tolist(), ["sample", "new sample"])
-        self.assertEqual(table["concentration_coefficient"].tolist(), [1, 1])
+        self.assertEqual(table["concentration_in_mM"].tolist(), [1, 1])
 
     def test_edited_table_controls_all_sheets_and_plots_without_reading_excluded_csvs(self):
         self.write_spectrum("removed", [100, 200, 300])
         merge.merge_spectra(self.folder)
         table_file = self.folder / "concentration_table.txt"
         original = (
-            "\ufeffspectrum\t\tconcentration_coefficient\t\tPh\t\tshort name\t\r\n"
+            "\ufeff" + MRE_SETTINGS + "spectrum\t\tconcentration_in_mM\t\tPh\t\tshort name\t\r\n"
             "sample\t\t2\t\t6.8\t\tMy label\t\r\n\r\n"
         ).encode("utf-8")
         table_file.write_bytes(original)
@@ -137,7 +141,7 @@ class MergeTests(unittest.TestCase):
         def inspect_plot(*args, **kwargs):
             for axis in plt.gcf().axes:
                 self.assertEqual([line.get_label() for line in axis.lines], ["My label"])
-            np.testing.assert_allclose(plt.gcf().axes[0].lines[0].get_ydata(), [2.5, 4, 5.5])
+            np.testing.assert_allclose(plt.gcf().axes[0].lines[0].get_ydata(), [2500, 4000, 5500])
 
         with patch.object(plt, "show", side_effect=inspect_plot), \
                 patch.object(merge, "read_spectrum", wraps=merge.read_spectrum) as read:
@@ -145,12 +149,11 @@ class MergeTests(unittest.TestCase):
         self.assertEqual([call.args[0].stem for call in read.call_args_list], ["sample"])
         workbook = load_workbook(output)
         try:
-            for sheet in ("CD", "HT", "Abs"):
+            for sheet in ("CD", "HT", "Epsilon"):
                 self.assertEqual([cell.value for cell in workbook[sheet][1]],
                                  ["wavelength_nm", "My label"])
-            for sheet in ("CD_subtr", "Abs_subtr"):
-                self.assertEqual([cell.value for cell in workbook[sheet][1]],
-                                 ["wavelength_nm", "My label", "zero", "My label"])
+            self.assertEqual([cell.value for cell in workbook["CD_subtr"][1]],
+                             ["wavelength_nm", "My label", "zero", "My label"])
         finally:
             workbook.close()
         self.assertEqual(table_file.read_bytes(), original)
@@ -183,7 +186,7 @@ class MergeTests(unittest.TestCase):
         self.write_spectrum(reference, [1, 2, 3], time="20:00:00")
         table_file = self.folder / "concentration_table.txt"
         table_file.write_text(
-            "spectrum\tconcentration_coefficient\tPh\n"
+            MRE_SETTINGS + "spectrum\tconcentration_in_mM\tPh\n"
             f"{second}\t4\t6.8\n{reference}\t1\t7\n{first}\t2\t6.5\n",
             encoding="utf-8",
         )
@@ -192,19 +195,20 @@ class MergeTests(unittest.TestCase):
         def inspect_plot(*args, **kwargs):
             for axis in plt.gcf().axes:
                 self.assertEqual([line.get_label() for line in axis.lines], ["7.43", "5.77"])
-            np.testing.assert_allclose(plt.gcf().axes[0].lines[0].get_ydata(), [2, 3, 4])
+            np.testing.assert_allclose(plt.gcf().axes[0].lines[0].get_ydata(), [2000, 3000, 4000])
 
         with patch.object(plt, "show", side_effect=inspect_plot):
             output = merge.merge_spectra(self.folder, subtract="H2O", plot=True)
         workbook = load_workbook(output)
         try:
             raw_names = ["wavelength_nm", "7.43", "5.77", reference]
-            for sheet in ("CD", "HT", "Abs"):
+            for sheet in ("CD", "HT"):
                 self.assertEqual([cell.value for cell in workbook[sheet][1]], raw_names)
-            for sheet in ("CD_subtr", "Abs_subtr"):
-                self.assertEqual([cell.value for cell in workbook[sheet][1]],
-                                 [*raw_names, "zero", "7.43", "5.77"])
-                self.assertEqual(workbook[sheet]["F2"].value, "=(B2-$D2)/2.0")
+            self.assertEqual([cell.value for cell in workbook["Epsilon"][1]],
+                             ["wavelength_nm", "7.43", "5.77"])
+            self.assertEqual([cell.value for cell in workbook["CD_subtr"][1]],
+                             [*raw_names, "zero", "7.43", "5.77"])
+            self.assertEqual(workbook["CD_subtr"]["F2"].value, "=(B2-$D2)/2.0")
         finally:
             workbook.close()
         table = merge.load_concentration_table(
@@ -212,7 +216,7 @@ class MergeTests(unittest.TestCase):
         )
         self.assertEqual(table.index.tolist(), [first, second])
         self.assertEqual(table["short name"].tolist(), ["7.43", "5.77"])
-        self.assertEqual(table["concentration_coefficient"].tolist(), [2, 4])
+        self.assertEqual(table["concentration_in_mM"].tolist(), [2, 4])
         self.assertEqual(table["pH"].astype(float).tolist(), [6.5, 6.8])
         merge.merge_spectra(self.folder, subtract="H2O")
         self.assertEqual(table_file.read_bytes(), contents)
@@ -224,7 +228,7 @@ class MergeTests(unittest.TestCase):
                 separator = "\t\t" if aligned else "\t"
                 table_file = self.folder / "concentration_table.txt"
                 table_file.write_text(
-                    separator.join(merge.CONCENTRATION_COLUMNS) + "\n"
+                    MRE_SETTINGS + separator.join(merge.CONCENTRATION_COLUMNS) + "\n"
                     + separator.join([names[1], "3", "6.5", "outdated"]) + "\n"
                     + f"{names[0]}\t2\t\told label\n",
                     encoding="utf-8",
@@ -233,7 +237,7 @@ class MergeTests(unittest.TestCase):
                 table = merge.load_concentration_table(self.folder, names)
                 self.assertEqual(table["short name"].tolist(), ["old label", "outdated"])
                 self.assertEqual(table["pH"].astype(float).tolist(), [7.43, 6.5])
-                self.assertEqual(table["concentration_coefficient"].tolist(), [2, 3])
+                self.assertEqual(table["concentration_in_mM"].tolist(), [2, 3])
                 self.assertEqual(table_file.read_bytes(), contents)
 
     def test_ph_is_extracted_from_filename_tokens(self):
@@ -258,30 +262,30 @@ class MergeTests(unittest.TestCase):
             "peptide_pH7.9_0uL_1mm_185-300nm_4sc_20nm-1",
             "H2O_1mm_185-300nm_4sc_20nm-1",
         ]
-        merge.load_concentration_coefficients(self.folder, names)
-        table = pd.read_csv(self.folder / "concentration_table.txt", sep="\t")
+        merge.load_sample_concentrations(self.folder, names)
+        table = pd.read_csv(self.folder / "concentration_table.txt", sep="\t", skiprows=3)
         self.assertEqual(table["spectrum"].tolist(), names)
         self.assertEqual(table["pH"].tolist(), [7.43, 7.9, 7.0])
-        self.assertEqual(table["concentration_coefficient"].tolist(), [1.0, 1.0, 1.0])
+        self.assertEqual(table["concentration_in_mM"].tolist(), [1.0, 1.0, 1.0])
 
     def test_missing_ph_in_existing_tables_is_inferred(self):
         for contents in (
-            "spectrum\tconcentration_coefficient\nsample_pH5.77\t2\n",
-            "spectrum\tconcentration_coefficient\tPh\nsample_pH5.77\t2\t\n",
+            "spectrum\tconcentration_in_mM\nsample_pH5.77\t2\n",
+            "spectrum\tconcentration_in_mM\tPh\nsample_pH5.77\t2\t\n",
         ):
             with self.subTest(contents=contents):
                 table_file = self.folder / "concentration_table.txt"
-                table_file.write_text(contents, encoding="utf-8")
+                table_file.write_text(MRE_SETTINGS + contents, encoding="utf-8")
                 original = table_file.read_bytes()
                 table = merge.load_concentration_table(self.folder, ["sample_pH5.77"])
                 self.assertEqual(table["pH"].tolist(), [5.77])
-                self.assertEqual(table["concentration_coefficient"].tolist(), [2])
+                self.assertEqual(table["concentration_in_mM"].tolist(), [2])
                 self.assertEqual(table_file.read_bytes(), original)
 
     def test_existing_ph_is_preserved(self):
         table_file = self.folder / "concentration_table.txt"
         table_file.write_text(
-            "spectrum\tconcentration_coefficient\tPh\n"
+            MRE_SETTINGS + "spectrum\tconcentration_in_mM\tPh\n"
             "sample_pH7.43\t2\t6.8\nH2O_1mm\t3\t6.5\n",
             encoding="utf-8",
         )
@@ -289,33 +293,33 @@ class MergeTests(unittest.TestCase):
         original = table_file.read_bytes()
         table = merge.load_concentration_table(self.folder, names)
         self.assertEqual(table["pH"].astype(float).tolist(), [6.8, 6.5])
-        self.assertEqual(table["concentration_coefficient"].tolist(), [2, 3])
+        self.assertEqual(table["concentration_in_mM"].tolist(), [2, 3])
         self.assertEqual(table_file.read_bytes(), original)
 
     def test_concentration_table_accepts_alignment_tabs(self):
         names = ["H2O reference", "sample_pH5.77"]
         for contents, expected_ph in (
             (
-                "spectrum\t\tconcentration_coefficient\t\n"
+                "spectrum\t\tconcentration_in_mM\t\n"
                 "H2O reference\t\t\t\t3\t\n"
                 " sample_pH5.77 \t\t2\n",
                 [7.0, 5.77],
             ),
             (
-                "spectrum\tconcentration_coefficient\tPh\n"
+                "spectrum\tconcentration_in_mM\tPh\n"
                 "H2O reference\t\t\t\t3\t7.0\n"
                 "sample_pH5.77\t\t2\t\t6.8\t\n",
                 [7.0, 6.8],
             ),
             (
-                "spectrum\t\tconcentration_coefficient\t\tPh\t\n"
+                "spectrum\t\tconcentration_in_mM\t\tPh\t\n"
                 "\n\t\t\n  \t  \t\n"
                 "H2O reference\t\t3\t\t\n"
                 "sample_pH5.77\t2\t\n",
                 [7.0, 5.77],
             ),
             (
-                "spectrum\t\tconcentration_coefficient\t\tPh\tshort name\t\n"
+                "spectrum\t\tconcentration_in_mM\t\tPh\tshort name\t\n"
                 "H2O reference\t\t3\t7.0\n"
                 "sample_pH5.77\t2\t6.8\n",
                 [7.0, 6.8],
@@ -323,29 +327,29 @@ class MergeTests(unittest.TestCase):
         ):
             with self.subTest(contents=contents):
                 table_file = self.folder / "concentration_table.txt"
-                table_file.write_text(contents, encoding="utf-8-sig")
+                table_file.write_text(MRE_SETTINGS + contents, encoding="utf-8-sig")
                 original = table_file.read_bytes()
                 table = merge.load_concentration_table(self.folder, names)
-                self.assertEqual(table["concentration_coefficient"].to_dict(), dict(zip(names, [3, 2])))
+                self.assertEqual(table["concentration_in_mM"].to_dict(), dict(zip(names, [3, 2])))
                 self.assertEqual(table.index.tolist(), names)
                 self.assertEqual(table["pH"].astype(float).tolist(), expected_ph)
                 self.assertEqual(table_file.read_bytes(), original)
 
     def test_duplicate_spectra_with_alignment_tabs_report_names(self):
-        self.write_coefficients("sample\t\t\t1\nsample\t\t2\n")
+        self.write_concentrations("sample\t\t\t1\nsample\t\t2\n")
         with self.assertRaisesRegex(ValueError, "Duplicate spectra.*: sample$"):
-            merge.load_concentration_coefficients(self.folder, ["sample"])
+            merge.load_sample_concentrations(self.folder, ["sample"])
 
     def test_concentration_table_rejects_extra_values_without_rewriting(self):
         table_file = self.folder / "concentration_table.txt"
         contents = (
-            "spectrum\tconcentration_coefficient\tPh\n"
+            "spectrum\tconcentration_in_mM\tPh\n"
             "sample\t\t2\t7.0\t8.0\n"
         )
-        table_file.write_text(contents, encoding="utf-8")
+        table_file.write_text(MRE_SETTINGS + contents, encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "tab-separated columns"):
-            merge.load_concentration_coefficients(self.folder, ["sample"])
-        self.assertEqual(table_file.read_text(encoding="utf-8"), contents)
+            merge.load_sample_concentrations(self.folder, ["sample"])
+        self.assertEqual(table_file.read_text(encoding="utf-8"), MRE_SETTINGS + contents)
 
     def test_cli_no_longer_offers_refresh_ph(self):
         result = subprocess.run(
@@ -361,7 +365,7 @@ class MergeTests(unittest.TestCase):
         self.write_spectrum("morning", [3, 6, 9], time="6:41:36 AM")
         table_file = self.folder / "concentration_table.txt"
         table_file.write_text(
-            "spectrum\t\t\t\tconcentration_coefficient\tPh\n"
+            MRE_SETTINGS + "spectrum\t\t\t\tconcentration_in_mM\tPh\n"
             "a_later\t4\t6.5\nsample\t2\t7.2\n"
             "z_earlier\t5\t8.1\nmorning\t3\t6.8\n",
             encoding="utf-8",
@@ -371,7 +375,7 @@ class MergeTests(unittest.TestCase):
 
         output = merge.merge_spectra(self.folder)
         with pd.ExcelFile(output) as workbook:
-            for sheet_name in ("CD", "HT", "Abs"):
+            for sheet_name in ("CD", "HT", "Epsilon"):
                 channel = pd.read_excel(workbook, sheet_name=sheet_name)
                 self.assertEqual(channel.columns.tolist(), ["wavelength_nm", *expected_names])
         summary = pd.read_excel(output, sheet_name="CD_subtr", header=None)
@@ -388,9 +392,9 @@ class MergeTests(unittest.TestCase):
     def test_new_concentration_table_follows_acquisition_datetime(self):
         self.write_spectrum("z_earlier", [1, 2, 3], time="06:00:00")
         merge.merge_spectra(self.folder)
-        table = pd.read_csv(self.folder / "concentration_table.txt", sep="\t")
+        table = pd.read_csv(self.folder / "concentration_table.txt", sep="\t", skiprows=3)
         self.assertEqual(table["spectrum"].tolist(), ["z_earlier", "sample"])
-        self.assertEqual(table["concentration_coefficient"].tolist(), [1.0, 1.0])
+        self.assertEqual(table["concentration_in_mM"].tolist(), [1.0, 1.0])
 
     def test_equal_timestamps_use_filename_order(self):
         self.write_spectrum("zzz", [1, 2, 3])
@@ -494,11 +498,11 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(frame.index.tolist(), [0, 1, 2])
         output = merge.merge_spectra(self.folder)
         with pd.ExcelFile(output) as workbook:
-            self.assertEqual(workbook.sheet_names, ["CD", "HT", "Abs", "CD_subtr", "Abs_subtr"])
+            self.assertEqual(workbook.sheet_names, ["CD", "HT", "CD_subtr", "MRE", "MRE_parameters", "Epsilon"])
             for sheet_name, expected_sample, expected_other in (
                 ("CD", [5, 8, 11], [1, 2, 3]),
                 ("HT", [500, 500, 500], [650, 650, 650]),
-                ("Abs", [0.25, 0.25, 0.25], [0.5, 0.5, 0.5]),
+                ("Epsilon", [2500, 2500, 2500], [5000, 5000, 5000]),
             ):
                 with self.subTest(sheet_name=sheet_name):
                     channel = pd.read_excel(workbook, sheet_name=sheet_name)
@@ -506,54 +510,63 @@ class MergeTests(unittest.TestCase):
                     self.assertEqual(channel["sample"].tolist(), expected_sample)
                     self.assertEqual(channel["other sample"].tolist(), expected_other)
 
-    def test_three_column_exports_leave_absorbance_blank(self):
+    def test_three_column_exports_leave_epsilon_blank(self):
         self.write_spectrum("sample", [5, 8, 11], absorbance=None)
         output = merge.merge_spectra(self.folder)
-        absorbance = pd.read_excel(output, sheet_name="Abs")
+        absorbance = pd.read_excel(output, sheet_name="Epsilon")
         self.assertEqual(absorbance["wavelength_nm"].tolist(), [200, 201, 202])
         self.assertTrue(absorbance["sample"].isna().all())
 
-    def test_absorbance_normalization_preserves_measurements_with_cd_processing(self):
+    def test_epsilon_uses_residue_and_path_settings_without_cd_smoothing(self):
         wavelengths = np.arange(200, 205)
         values = [0.4, 1.6, 0.8, 2.4, 1.2]
-        self.write_spectrum("sample", [5, 8, 11, 7, 3], wavelengths=wavelengths, absorbance=values, ht=501)
-        self.write_coefficients("sample\t2\n")
+        self.write_spectrum("sample", [5, 8, 11, 7, 3], wavelengths=wavelengths,
+                            absorbance=values, ht=[499, 500, 501, 400, 400])
+        (self.folder / "concentration_table.txt").write_text(
+            "pathlength_in_mm = 2\nnumber_of_amino_acids = 20\n\n"
+            "spectrum\tconcentration_in_mM\nsample\t0.1\n", encoding="utf-8",
+        )
+        expected = [1000, 4000, np.nan, 6000, 3000]
 
         def inspect_chart(*args, **kwargs):
             cd_axis, abs_axis = plt.gcf().axes
-            self.assertTrue(np.isnan(cd_axis.get_lines()[0].get_ydata()).all())
-            self.assertNotIn("HT cutoff", abs_axis.get_title())
+            self.assertTrue(np.isnan(cd_axis.get_lines()[0].get_ydata()[2]))
+            self.assertIn("HT cutoff: 500 V", abs_axis.get_title())
             self.assertNotIn("Savitzky-Golay", abs_axis.get_title())
-            np.testing.assert_allclose(abs_axis.get_lines()[0].get_ydata(), [0.2, 0.8, 0.4, 1.2, 0.6])
+            np.testing.assert_allclose(abs_axis.get_lines()[0].get_ydata(), expected, equal_nan=True)
 
         with patch.object(plt, "show", side_effect=inspect_chart):
             output = merge.merge_spectra(self.folder, smooth=5, ht_threshold=500, plot=True)
         workbook = load_workbook(output, data_only=False)
         self.addCleanup(workbook.close)
-        sheet = workbook["Abs_subtr"]
-        self.assertEqual([cell.value for cell in sheet[1]], ["wavelength_nm", "sample", "zero", "sample"])
+        sheet = workbook["Epsilon"]
+        self.assertEqual([cell.value for cell in sheet[1]], ["wavelength_nm", "sample"])
         self.assertEqual([sheet.cell(row, 1).value for row in range(2, 7)], wavelengths.tolist())
-        for sheet_name in ("Abs", "Abs_subtr"):
-            self.assertEqual([workbook[sheet_name].cell(row, 2).value for row in range(2, 7)], values)
-        self.assertEqual([sheet.cell(row, 3).value for row in range(2, 7)], [0] * 5)
-        np.testing.assert_allclose([sheet.cell(row, 4).value for row in range(2, 7)], [0.2, 0.8, 0.4, 1.2, 0.6])
+        actual = np.array([sheet.cell(row, 2).value for row in range(2, 7)], dtype=float)
+        np.testing.assert_allclose(actual, expected, equal_nan=True)
+        self.assertNotIn("Abs", workbook.sheetnames)
+        self.assertNotIn("Abs_subtr", workbook.sheetnames)
+        metadata = dict(list(workbook["MRE_parameters"].values)[1:])
+        self.assertEqual(metadata["epsilon_units"], "M^-1 cm^-1 (per residue)")
+        self.assertIn("10000", metadata["epsilon_conversion"])
+        self.assertEqual(metadata["ht_threshold_V"], 500)
 
-    def test_absorbance_subtraction_matches_sheet_formulas_and_plot(self):
+    def test_epsilon_subtraction_matches_numeric_sheet_and_plot(self):
         self.write_spectrum("sample", [5, 8, 11], absorbance=[0.4, 0.8, 1.2])
         self.write_spectrum("H2O_reference", [1, 2, 3], absorbance=[0.1, 0.2, 0.3], time="19:00:00")
         self.write_spectrum("later sample", [4, 6, 8], absorbance=[0.05, 0.4, 0.9], time="20:00:00")
-        self.write_coefficients("sample\t2\nH2O_reference\t3\nlater sample\t1\n")
+        self.write_concentrations("sample\t2\nH2O_reference\t3\nlater sample\t1\n")
 
         def inspect_chart(*args, **kwargs):
             cd_axis, abs_axis = plt.gcf().axes
             self.assertEqual(abs_axis.get_xlabel(), "Wavelength (nm)")
-            self.assertEqual(abs_axis.get_ylabel(), "Normalized absorbance (AU)")
+            self.assertEqual(abs_axis.get_ylabel(), r"$\varepsilon$ (M$^{-1}$ cm$^{-1}$ per residue)")
             self.assertIn("H2O_reference", abs_axis.get_title())
             lines = abs_axis.get_lines()
             self.assertEqual([line.get_label() for line in lines], ["sample", "later sample"])
             np.testing.assert_allclose(lines[0].get_xdata(), [200, 201, 202])
-            np.testing.assert_allclose(lines[0].get_ydata(), [0.15, 0.3, 0.45])
-            np.testing.assert_allclose(lines[1].get_ydata(), [-0.05, 0.2, 0.6])
+            np.testing.assert_allclose(lines[0].get_ydata(), [1500, 3000, 4500])
+            np.testing.assert_allclose(lines[1].get_ydata(), [-500, 2000, 6000])
             for cd_line, abs_line in zip(cd_axis.get_lines(), lines):
                 np.testing.assert_allclose(cd_line.get_color(), abs_line.get_color())
 
@@ -562,18 +575,46 @@ class MergeTests(unittest.TestCase):
         show.assert_called_once_with(block=True)
         workbook = load_workbook(output, data_only=False)
         self.addCleanup(workbook.close)
-        sheet = workbook["Abs_subtr"]
+        sheet = workbook["Epsilon"]
         self.assertEqual([cell.value for cell in sheet[1]], [
-            "wavelength_nm", "sample", "H2O_reference", "later sample", "zero", "sample", "later sample",
+            "wavelength_nm", "sample", "later sample",
         ])
-        for row in range(2, 5):
-            self.assertEqual(sheet.cell(row, 6).value, f"=(B{row}-$C{row})/2.0")
-            self.assertEqual(sheet.cell(row, 7).value, f"=D{row}-$C{row}")
-            self.assertEqual(sheet.cell(row, 6).data_type, "f")
-            self.assertEqual(sheet.cell(row, 7).data_type, "f")
-        for column, expected in ((2, [0.4, 0.8, 1.2]), (3, [0.1, 0.2, 0.3]), (4, [0.05, 0.4, 0.9])):
-            for sheet_name in ("Abs", "Abs_subtr"):
-                self.assertEqual([workbook[sheet_name].cell(row, column).value for row in range(2, 5)], expected)
+        for column, expected in ((2, [1500, 3000, 4500]), (3, [-500, 2000, 6000])):
+            np.testing.assert_allclose([sheet.cell(row, column).value for row in range(2, 5)], expected)
+            self.assertTrue(all(sheet.cell(row, column).data_type == "n" for row in range(2, 5)))
+        workbook.close()
+        cached = pd.read_excel(output, sheet_name="Epsilon")
+        np.testing.assert_allclose(cached["sample"], [1500, 3000, 4500])
+
+    def test_epsilon_conversion_example_and_parameter_edits(self):
+        self.write_spectrum("sample", [5, 8, 11], absorbance=0.5)
+        table_file = self.folder / "concentration_table.txt"
+        for path, residues, concentration, expected in (
+            (1, 20, 0.1, 2500),
+            (2, 20, 0.1, 1250),
+            (1, 40, 0.1, 1250),
+            (1, 20, 0.2, 1250),
+        ):
+            with self.subTest(path=path, residues=residues, concentration=concentration):
+                table_file.write_text(
+                    f"pathlength_in_mm = {path}\nnumber_of_amino_acids = {residues}\n\n"
+                    f"spectrum\tconcentration_in_mM\nsample\t{concentration}\n",
+                    encoding="utf-8",
+                )
+                output = merge.merge_spectra(self.folder)
+                epsilon = pd.read_excel(output, sheet_name="Epsilon")
+                np.testing.assert_allclose(epsilon["sample"], [expected] * 3)
+
+    def test_invalid_absorbance_or_epsilon_overflow_preserves_existing_workbook(self):
+        self.write_concentrations("sample\t1\n")
+        output = merge.merge_spectra(self.folder)
+        original = output.read_bytes()
+        for value, error in (("bad", "numeric"), (np.inf, "finite"), (1e308, "Nonfinite epsilon")):
+            with self.subTest(value=value):
+                self.write_spectrum("sample", [5, 8, 11], absorbance=[0.1, value, 0.3])
+                with self.assertRaisesRegex(ValueError, error):
+                    merge.merge_spectra(self.folder)
+                self.assertEqual(output.read_bytes(), original)
 
     def test_missing_absorbance_stays_blank_in_corrections_and_plot(self):
         for reference_abs in (None, [0.1, np.nan, 0.3]):
@@ -581,7 +622,7 @@ class MergeTests(unittest.TestCase):
                 self.write_spectrum("sample", [5, 8, 11], absorbance=[0.4, 0.8, np.nan])
                 self.write_spectrum("H2O_reference", [1, 2, 3], absorbance=reference_abs, time="19:00:00")
                 self.write_spectrum("legacy sample", [4, 6, 8], absorbance=None, time="20:00:00")
-                self.write_coefficients("sample\t2\nH2O_reference\t3\nlegacy sample\t1\n")
+                self.write_concentrations("sample\t2\nH2O_reference\t3\nlegacy sample\t1\n")
 
                 def inspect_chart(*args, **kwargs):
                     axes = plt.gcf().axes
@@ -589,15 +630,18 @@ class MergeTests(unittest.TestCase):
                     if reference_abs is not None:
                         lines = axes[1].get_lines()
                         self.assertEqual([line.get_label() for line in lines], ["sample"])
-                        np.testing.assert_allclose(lines[0].get_ydata(), [0.15, np.nan, np.nan], equal_nan=True)
+                        np.testing.assert_allclose(lines[0].get_ydata(), [1500, np.nan, np.nan], equal_nan=True)
 
                 with patch.object(plt, "show", side_effect=inspect_chart):
                     output = merge.merge_spectra(self.folder, subtract="H2O", plot=True)
                 workbook = load_workbook(output, data_only=False)
                 try:
-                    sheet = workbook["Abs_subtr"]
-                    self.assertEqual(sheet["F2"].value, None if reference_abs is None else "=(B2-$C2)/2.0")
-                    for coordinate in ("F3", "F4", "G2", "G3", "G4"):
+                    sheet = workbook["Epsilon"]
+                    if reference_abs is None:
+                        self.assertIsNone(sheet["B2"].value)
+                    else:
+                        self.assertAlmostEqual(sheet["B2"].value, 1500)
+                    for coordinate in ("B3", "B4", "C2", "C3", "C4"):
                         self.assertIsNone(sheet[coordinate].value)
                         self.assertNotEqual(sheet[coordinate].data_type, "f")
                 finally:
@@ -606,7 +650,7 @@ class MergeTests(unittest.TestCase):
     def test_all_filenames_are_treated_as_samples(self):
         self.write_spectrum("water", [1, 2, 3])
         self.write_spectrum("Water blank", [2, 4, 6])
-        self.write_coefficients("sample\t2\nwater\t4\nWater blank\t2\n")
+        self.write_concentrations("sample\t2\nwater\t4\nWater blank\t2\n")
         self.assertEqual(len(merge.find_spectral_files(self.folder)), 3)
 
         output = merge.merge_spectra(self.folder)
@@ -627,11 +671,11 @@ class MergeTests(unittest.TestCase):
     def test_subtraction_writes_formulas_for_each_wavelength_and_preserves_raw_data(self):
         self.write_spectrum("H2O_reference", [1, 2, 3], time="19:00:00")
         self.write_spectrum("later sample", [4, 6, 8], time="20:00:00")
-        self.write_coefficients("sample\t2\nlater sample\t1\n")
+        self.write_concentrations("sample\t2\nlater sample\t1\n")
         output = merge.merge_spectra(self.folder, subtract="h2o")
         workbook = load_workbook(output, data_only=False)
         self.addCleanup(workbook.close)
-        self.assertEqual(workbook.sheetnames, ["CD", "HT", "Abs", "CD_subtr", "Abs_subtr"])
+        self.assertEqual(workbook.sheetnames, ["CD", "HT", "CD_subtr", "MRE", "MRE_parameters", "Epsilon"])
         sheet = workbook["CD_subtr"]
         self.assertEqual([cell.value for cell in sheet[1]], [
             "wavelength_nm", "sample", "H2O_reference", "later sample", "zero",
@@ -647,7 +691,7 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(workbook["CD"]["B2"].value, 5)
         self.assertEqual(workbook["CD"]["C2"].value, 1)
         self.assertEqual(workbook["HT"]["B2"].value, 500)
-        self.assertEqual(workbook["Abs"]["B2"].value, 0.25)
+        self.assertEqual(workbook["Epsilon"]["B2"].value, 0)
         self.assertEqual(workbook.calculation.calcMode, "auto")
         self.assertTrue(workbook.calculation.fullCalcOnLoad)
         self.assertTrue(workbook.calculation.forceFullCalc)
@@ -663,8 +707,9 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(sheet["AB1"].value, "H2O_reference")
         self.assertEqual(sheet["AD2"].value, "=B2-$AB2")
         self.assertEqual(sheet["AD4"].value, "=B4-$AB4")
-        self.assertEqual(workbook["Abs_subtr"]["AD2"].value, "=B2-$AB2")
-        self.assertEqual(workbook["Abs_subtr"]["AD4"].value, "=B4-$AB4")
+        self.assertEqual(workbook["Epsilon"].max_column, 27)
+        self.assertEqual(workbook["Epsilon"]["AA2"].value, 0)
+        self.assertEqual(workbook["Epsilon"]["AA4"].value, 0)
 
     def test_missing_or_ambiguous_subtraction_reference_does_not_write_outputs(self):
         table_file = self.folder / "concentration_table.txt"
@@ -696,7 +741,7 @@ class MergeTests(unittest.TestCase):
         )
         self.addCleanup(workbook.close)
         self.assertEqual(workbook["CD_subtr"]["E2"].value, "=B2-$C2")
-        self.assertEqual(workbook["Abs_subtr"]["E2"].value, "=B2-$C2")
+        self.assertEqual(workbook["Epsilon"]["B2"].value, 0)
 
     def test_plot_is_disabled_by_default(self):
         with patch.object(merge, "plot_corrected_spectra") as plot:
@@ -705,7 +750,7 @@ class MergeTests(unittest.TestCase):
 
     def test_plot_displays_normalized_cd_in_acquisition_order(self):
         self.write_spectrum("a later sample", [-2, 4, 12], time="19:00:00")
-        self.write_coefficients("sample\t2\na later sample\t4\n")
+        self.write_concentrations("sample\t2\na later sample\t4\n")
         figures = []
 
         def inspect_chart(*args, **kwargs):
@@ -714,18 +759,18 @@ class MergeTests(unittest.TestCase):
             self.assertEqual(len(figure.axes), 2)
             axis = figure.axes[0]
             self.assertEqual(axis.get_xlabel(), "Wavelength (nm)")
-            self.assertEqual(axis.get_ylabel(), "Normalized CD (mdeg)")
+            self.assertEqual(axis.get_ylabel(), r"MRE (deg cm$^2$ dmol$^{-1}$ per residue)")
             lines = axis.get_lines()
             self.assertEqual([line.get_label() for line in lines], ["sample", "a later sample"])
             np.testing.assert_allclose(lines[0].get_xdata(), [200, 201, 202])
-            np.testing.assert_allclose(lines[0].get_ydata(), [2.5, 4, 5.5])
-            np.testing.assert_allclose(lines[1].get_ydata(), [-0.5, 1, 3])
+            np.testing.assert_allclose(lines[0].get_ydata(), [2500, 4000, 5500])
+            np.testing.assert_allclose(lines[1].get_ydata(), [-500, 1000, 3000])
             abs_axis = figure.axes[1]
-            self.assertEqual(abs_axis.get_ylabel(), "Normalized absorbance (AU)")
+            self.assertEqual(abs_axis.get_ylabel(), r"$\varepsilon$ (M$^{-1}$ cm$^{-1}$ per residue)")
             abs_lines = abs_axis.get_lines()
             self.assertEqual([line.get_label() for line in abs_lines], ["sample", "a later sample"])
-            np.testing.assert_allclose(abs_lines[0].get_ydata(), [0.125] * 3)
-            np.testing.assert_allclose(abs_lines[1].get_ydata(), [0.0625] * 3)
+            np.testing.assert_allclose(abs_lines[0].get_ydata(), [1250] * 3)
+            np.testing.assert_allclose(abs_lines[1].get_ydata(), [625] * 3)
             self.assertTrue((self.folder.parent / "instrument data-combined.xlsx").is_file())
 
         with patch.object(plt, "show", side_effect=inspect_chart) as show:
@@ -733,18 +778,61 @@ class MergeTests(unittest.TestCase):
         show.assert_called_once_with(block=True)
         self.assertFalse(plt.fignum_exists(figures[0].number))
 
+    def test_mre_plot_matches_saved_spectra_with_smoothing_and_ht_gaps(self):
+        wavelengths = np.arange(200, 209)
+        self.write_spectrum(
+            "sample", [5, 8, 11, 7, 4, 8, 13, 9, 4], wavelengths=wavelengths,
+            ht=[400, 400, 400, 400, 501, 400, 400, 400, 400],
+        )
+        self.write_spectrum(
+            "H2O_reference", np.ones(9), wavelengths=wavelengths,
+            absorbance=0.05, time="19:00:00", ht=400,
+        )
+        self.write_concentrations("sample\t2\n")
+
+        for subtract in (None, "H2O"):
+            with self.subTest(subtract=subtract):
+                def inspect_chart(*args, **kwargs):
+                    cd_axis, abs_axis = plt.gcf().axes
+                    self.assertEqual(cd_axis.get_ylabel(), r"MRE (deg cm$^2$ dmol$^{-1}$ per residue)")
+                    self.assertIn("MRE", cd_axis.get_title())
+                    self.assertEqual([line.get_label() for line in cd_axis.lines], ["sample"])
+                    output = self.folder.parent / "instrument data-combined.xlsx"
+                    workbook = load_workbook(output, data_only=True)
+                    try:
+                        rows = list(workbook["MRE"].values)[1:]
+                        np.testing.assert_allclose(cd_axis.lines[0].get_xdata(), [row[0] for row in rows])
+                        expected = np.array([row[1] for row in rows], dtype=float)
+                        np.testing.assert_allclose(cd_axis.lines[0].get_ydata(), expected, equal_nan=True)
+                        self.assertTrue(np.isnan(expected[4]))
+                        epsilon_rows = list(workbook["Epsilon"].values)[1:]
+                        epsilon_values = np.array([row[1] for row in epsilon_rows], dtype=float)
+                        np.testing.assert_allclose(abs_axis.lines[0].get_ydata(), epsilon_values, equal_nan=True)
+                    finally:
+                        workbook.close()
+                    self.assertEqual(abs_axis.get_ylabel(), r"$\varepsilon$ (M$^{-1}$ cm$^{-1}$ per residue)")
+                    expected_abs = np.full(9, 1250.0 if subtract is None else 1000.0)
+                    expected_abs[4] = np.nan
+                    np.testing.assert_allclose(abs_axis.lines[0].get_ydata(), expected_abs, equal_nan=True)
+
+                with patch.object(plt, "show", side_effect=inspect_chart) as show:
+                    merge.merge_spectra(
+                        self.folder, subtract=subtract, plot=True, smooth=4, ht_threshold=500,
+                    )
+                show.assert_called_once_with(block=True)
+
     def test_subtraction_plot_matches_corrections_and_keeps_excel_formulas(self):
         self.write_spectrum("H2O_reference", [1, 2, 3], time="19:00:00")
         self.write_spectrum("later sample", [4, 6, 8], time="20:00:00")
-        self.write_coefficients("sample\t2\nH2O_reference\t3\nlater sample\t1\n")
+        self.write_concentrations("sample\t2\nH2O_reference\t3\nlater sample\t1\n")
 
         def inspect_chart(*args, **kwargs):
             axis = plt.gcf().axes[0]
             self.assertIn("H2O_reference", axis.get_title())
             lines = axis.get_lines()
             self.assertEqual([line.get_label() for line in lines], ["sample", "later sample"])
-            np.testing.assert_allclose(lines[0].get_ydata(), [2, 3, 4])
-            np.testing.assert_allclose(lines[1].get_ydata(), [3, 4, 5])
+            np.testing.assert_allclose(lines[0].get_ydata(), [2000, 3000, 4000])
+            np.testing.assert_allclose(lines[1].get_ydata(), [3000, 4000, 5000])
 
         with patch.object(plt, "show", side_effect=inspect_chart) as show:
             output = merge.merge_spectra(self.folder, subtract="H2O", plot=True)
@@ -801,7 +889,7 @@ class MergeTests(unittest.TestCase):
             "H2O_reference", reference, wavelengths=wavelengths,
             time="19:00:00", ht=650, absorbance=0.5,
         )
-        self.write_coefficients("sample\t2\nH2O_reference\t3\n")
+        self.write_concentrations("sample\t2\nH2O_reference\t3\n")
         expected_sample = quadratic_window_fit(sample, 6)
         expected_reference = quadratic_window_fit(reference, 6)
 
@@ -812,7 +900,7 @@ class MergeTests(unittest.TestCase):
             self.assertEqual([line.get_label() for line in lines], ["sample"])
             np.testing.assert_allclose(lines[0].get_xdata(), wavelengths)
             np.testing.assert_allclose(
-                lines[0].get_ydata(), (expected_sample - expected_reference) / 2,
+                lines[0].get_ydata(), (expected_sample - expected_reference) * 500,
                 atol=1e-12,
             )
 
@@ -828,7 +916,7 @@ class MergeTests(unittest.TestCase):
             actual = [workbook[sheet_name].cell(row, column).value for row in range(2, 73)]
             np.testing.assert_allclose(actual, expected, atol=1e-12)
         self.assertEqual(workbook["HT"]["C2"].value, 650)
-        self.assertEqual(workbook["Abs"]["C2"].value, 0.5)
+        self.assertEqual(workbook["Epsilon"]["B2"].value, -1250)
         for row in range(2, 73):
             self.assertEqual(workbook["CD_subtr"].cell(row, 5).value, f"=(B{row}-$C{row})/2.0")
 
@@ -874,7 +962,7 @@ class MergeTests(unittest.TestCase):
     def test_ht_threshold_blanks_only_above_limit_for_each_spectrum(self):
         self.write_spectrum("sample", [5, 8, 11], ht=[499, 500, 501])
         self.write_spectrum("later sample", [2, 4, 6], ht=[501, 490, 500], time="19:00:00")
-        self.write_coefficients("sample\t2\nlater sample\t4\n")
+        self.write_concentrations("sample\t2\nlater sample\t4\n")
         output = merge.merge_spectra(self.folder, ht_threshold=500)
         workbook = load_workbook(output, data_only=False)
         self.addCleanup(workbook.close)
@@ -883,24 +971,31 @@ class MergeTests(unittest.TestCase):
             self.assertEqual(actual, expected)
         self.assertEqual([cell.value for cell in workbook["CD"]["A"]], ["wavelength_nm", 200, 201, 202])
         self.assertEqual([workbook["HT"].cell(row, 2).value for row in range(2, 5)], [499, 500, 501])
-        self.assertEqual([workbook["Abs"].cell(row, 2).value for row in range(2, 5)], [0.25] * 3)
+        self.assertEqual([workbook["Epsilon"].cell(row, 2).value for row in range(2, 5)], [1250, 1250, None])
+        self.assertEqual([workbook["Epsilon"].cell(row, 3).value for row in range(2, 5)], [None, 625, 625])
         sheet = workbook["CD_subtr"]
         self.assertEqual([sheet.cell(row, 5).value for row in range(2, 5)], [2.5, 4, None])
         self.assertEqual([sheet.cell(row, 6).value for row in range(2, 5)], [None, 1, 1.5])
 
     def test_ht_threshold_excludes_invalid_sample_or_reference_from_formulas_and_plot(self):
-        self.write_spectrum("sample", [5, 8, 11], ht=[499, 501, 499])
-        self.write_spectrum("H2O_reference", [1, 2, 3], ht=[501, 499, 499], time="19:00:00")
-        self.write_spectrum("later sample", [4, 6, 8], ht=[499, 499, 501], time="20:00:00")
-        self.write_coefficients("sample\t2\nH2O_reference\t3\nlater sample\t1\n")
+        self.write_spectrum("sample", [5, 8, 11], ht=[499, 501, 499], absorbance=[0.4, 0.6, 0.8])
+        self.write_spectrum("H2O_reference", [1, 2, 3], ht=[501, 499, 499],
+                            absorbance=[0.1, 0.2, 0.3], time="19:00:00")
+        self.write_spectrum("later sample", [4, 6, 8], ht=[499, 499, 501],
+                            absorbance=[0.5, 0.7, 0.9], time="20:00:00")
+        self.write_concentrations("sample\t2\nH2O_reference\t3\nlater sample\t1\n")
 
         def inspect_chart(*args, **kwargs):
             axis = plt.gcf().axes[0]
             self.assertIn("HT cutoff: 500 V", axis.get_title())
             lines = axis.get_lines()
             self.assertEqual([line.get_label() for line in lines], ["sample", "later sample"])
-            np.testing.assert_allclose(lines[0].get_ydata(), [np.nan, np.nan, 4], equal_nan=True)
-            np.testing.assert_allclose(lines[1].get_ydata(), [np.nan, 4, np.nan], equal_nan=True)
+            np.testing.assert_allclose(lines[0].get_ydata(), [np.nan, np.nan, 4000], equal_nan=True)
+            np.testing.assert_allclose(lines[1].get_ydata(), [np.nan, 4000, np.nan], equal_nan=True)
+            epsilon_axis = plt.gcf().axes[1]
+            self.assertIn("HT cutoff: 500 V", epsilon_axis.get_title())
+            np.testing.assert_allclose(epsilon_axis.lines[0].get_ydata(), [np.nan, np.nan, 2500], equal_nan=True)
+            np.testing.assert_allclose(epsilon_axis.lines[1].get_ydata(), [np.nan, 5000, np.nan], equal_nan=True)
 
         with patch.object(plt, "show", side_effect=inspect_chart):
             output = merge.merge_spectra(self.folder, subtract="H2O", ht_threshold=500, plot=True)
@@ -914,6 +1009,11 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(sheet["G3"].value, "=D3-$C3")
         self.assertEqual(sheet["B2"].value, 5)
         self.assertIsNone(sheet["C2"].value)
+        epsilon = workbook["Epsilon"]
+        for coordinate in ("B2", "C2", "B3", "C4"):
+            self.assertIsNone(epsilon[coordinate].value)
+        self.assertAlmostEqual(epsilon["B4"].value, 2500)
+        self.assertAlmostEqual(epsilon["C3"].value, 5000)
 
     def test_ht_filtering_precedes_smoothing_and_keeps_gaps(self):
         positions = np.arange(31, dtype=float)
@@ -924,14 +1024,14 @@ class MergeTests(unittest.TestCase):
         ht[[0, 10, 30]] = 501
         self.write_spectrum("sample", sample, wavelengths=wavelengths, ht=ht)
         self.write_spectrum("H2O_reference", np.zeros(31), wavelengths=wavelengths, time="19:00:00", ht=300)
-        self.write_coefficients("sample\t2\nH2O_reference\t1\n")
+        self.write_concentrations("sample\t2\nH2O_reference\t1\n")
         expected = np.full(31, np.nan)
         expected[1:10] = quadratic_window_fit(sample[1:10], 6)
         expected[11:30] = quadratic_window_fit(sample[11:30], 6)
 
         def inspect_chart(*args, **kwargs):
             lines = plt.gcf().axes[0].get_lines()
-            np.testing.assert_allclose(lines[0].get_ydata(), expected / 2, atol=1e-12, equal_nan=True)
+            np.testing.assert_allclose(lines[0].get_ydata(), expected * 500, atol=1e-12, equal_nan=True)
 
         with patch.object(plt, "show", side_effect=inspect_chart):
             output = merge.merge_spectra(self.folder, smooth=6, ht_threshold=500, subtract="H2O", plot=True)
@@ -955,11 +1055,13 @@ class MergeTests(unittest.TestCase):
 
     def test_all_cd_points_can_be_excluded_with_smoothing(self):
         self.write_spectrum("sample", [5, 8, 11], ht=501)
-        output = merge.merge_spectra(self.folder, ht_threshold=500, smooth=3)
+        with patch.object(plt, "show", side_effect=lambda **kwargs: self.assertEqual(len(plt.gcf().axes), 1)):
+            output = merge.merge_spectra(self.folder, ht_threshold=500, smooth=3, plot=True)
         workbook = load_workbook(output, data_only=False)
         self.addCleanup(workbook.close)
         self.assertEqual([workbook["CD"].cell(row, 2).value for row in range(2, 5)], [None] * 3)
         self.assertEqual([workbook["CD_subtr"].cell(row, 4).value for row in range(2, 5)], [None] * 3)
+        self.assertEqual([workbook["Epsilon"].cell(row, 2).value for row in range(2, 5)], [None] * 3)
 
     def test_cli_ht_threshold_supports_default_and_custom_values(self):
         self.write_spectrum("sample", [5, 8, 11], ht=[500, 500.25, 500.75])
@@ -978,6 +1080,8 @@ class MergeTests(unittest.TestCase):
                     self.assertEqual([workbook["CD"].cell(row, 2).value for row in range(2, 5)], expected)
                     self.assertEqual(workbook["CD_subtr"]["E2"].value, "=B2-$C2")
                     self.assertIsNone(workbook["CD_subtr"]["E4"].value)
+                    epsilon = [workbook["Epsilon"].cell(row, 2).value for row in range(2, 5)]
+                    self.assertEqual(epsilon, [0 if value is not None else None for value in expected])
                 finally:
                     workbook.close()
 
@@ -996,12 +1100,12 @@ class MergeTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, f"sample.csv must be {expected}"):
                     merge.merge_spectra(self.folder, ht_threshold=500)
 
-    def test_invalid_concentration_coefficients_are_rejected(self):
+    def test_invalid_sample_concentrations_are_rejected(self):
         for coefficient in ("0", "-1", "NaN", "inf", "-inf"):
             with self.subTest(coefficient=coefficient):
-                self.write_coefficients(f"sample\t{coefficient}\n")
+                self.write_concentrations(f"sample\t{coefficient}\n")
                 with self.assertRaisesRegex(ValueError, "finite and greater than zero"):
-                    merge.load_concentration_coefficients(self.folder, ["sample"])
+                    merge.load_sample_concentrations(self.folder, ["sample"])
 
     def test_concentration_table_must_match_samples(self):
         for rows, error in (
@@ -1009,9 +1113,9 @@ class MergeTests(unittest.TestCase):
             ("other\t1\n", "not present in data folder: other"),
         ):
             with self.subTest(rows=rows):
-                self.write_coefficients(rows)
+                self.write_concentrations(rows)
                 with self.assertRaisesRegex(ValueError, error):
-                    merge.load_concentration_coefficients(self.folder, ["sample"])
+                    merge.load_sample_concentrations(self.folder, ["sample"])
 
     def test_empty_selection_and_invalid_short_names_leave_existing_outputs_untouched(self):
         output = merge.merge_spectra(self.folder)
@@ -1027,7 +1131,7 @@ class MergeTests(unittest.TestCase):
         ):
             with self.subTest(rows=rows):
                 contents = "\t".join(merge.CONCENTRATION_COLUMNS) + "\n" + rows
-                table_file.write_text(contents, encoding="utf-8")
+                table_file.write_text(MRE_SETTINGS + contents, encoding="utf-8")
                 original_table = table_file.read_bytes()
                 with self.assertRaisesRegex(ValueError, error):
                     merge.merge_spectra(self.folder)

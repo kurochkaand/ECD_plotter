@@ -78,7 +78,7 @@ def resolve_sesca(options: SescaOptions) -> tuple[Path, Path]:
             f"SESCA_deconv.py not found in {directory / 'scripts'}. "
             f"Download and extract SESCA from {SESCA_URL} to {DEFAULT_SESCA_DIR}, "
             "or pass --sesca-dir PATH to its root directory. "
-            "Use --mre-only to convert without fitting."
+            "MRE conversion is performed by merge.py and does not require SESCA."
         )
     basis = Path(options.basis)
     if not basis.is_file():
