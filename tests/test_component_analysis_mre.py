@@ -170,14 +170,205 @@ class MreSvdTests(unittest.TestCase):
         def inspect_plot(*args, **kwargs):
             saved = self.open_workbook()
             self.assertIn(analysis.RESULTS_SHEET, saved.sheetnames)
-            self.assertEqual(len(plt.gcf().axes), 2)
-            np.testing.assert_array_equal(plt.gcf().axes[0].lines[0].get_xdata(), np.arange(1, 9))
-            self.assertIn("190-250 nm", plt.gcf()._suptitle.get_text())
+            figures = [plt.figure(number) for number in plt.get_fignums()]
+            singular_figures = [
+                figure for figure in figures
+                if any(axis.get_title() == "MRE singular values" for axis in figure.axes)
+            ]
+            self.assertEqual(len(singular_figures), 1)
+            figure = singular_figures[0]
+            singular_axis = next(
+                axis for axis in figure.axes if axis.get_title() == "MRE singular values"
+            )
+            np.testing.assert_array_equal(singular_axis.lines[0].get_xdata(), np.arange(1, 9))
+            self.assertIn("190-250 nm", figure._suptitle.get_text())
+            self.assertGreater(len(figures), 1)
 
         with patch.object(plt, "show", side_effect=inspect_plot) as show:
-            self.run_analysis(plot=True)
+            self.run_analysis(plot=True, reconstruction_ranks=[2, 5])
         show.assert_called_once_with(block=True)
         self.assertEqual(plt.get_fignums(), [])
+
+    def test_plot_preserves_figures_created_by_the_caller(self):
+        figure = plt.figure()
+        self.addCleanup(plt.close, figure)
+        with patch.object(plt, "show") as show:
+            self.run_analysis(plot=True)
+        show.assert_called_once_with(block=True)
+        self.assertEqual(plt.get_fignums(), [figure.number])
+
+    def test_diagnostic_sheets_are_replaced_without_removing_other_analyses(self):
+        self.run_analysis(reconstruction_ranks=[2, 5])
+        titles = (
+            analysis.PATTERNS_SHEET, analysis.SCORES_SHEET, analysis.CENTERED_SHEET,
+            analysis.RECONSTRUCTION_SHEET, analysis.COMPARISON_SHEET,
+            analysis.NOISE_SHEET, analysis.NOISE_WAVELENGTH_SHEET,
+        )
+        workbook = self.open_workbook()
+        for title in titles:
+            self.assertIn(title, workbook.sheetnames)
+            workbook[title]["A10000"] = "stale output"
+        workbook.save(self.workbook_file)
+        workbook.close()
+
+        self.run_analysis(reconstruction_ranks=[1, 2], diagnostic_components=3)
+        workbook = self.open_workbook()
+        for title in titles:
+            self.assertEqual(workbook.sheetnames.count(title), 1)
+            self.assertLess(workbook[title].max_row, 10000)
+        self.assertEqual(workbook["CD_subtr"]["C2"].value, "=A2-B2")
+        self.assertEqual(list(workbook["SESCA_results"].values), [("keep", "SESCA_results")])
+
+    def test_default_run_skips_all_optional_calculations_and_sheets(self):
+        with patch.object(analysis, "decompose_spectra") as decompose, \
+                patch.object(analysis, "reconstruct_spectra") as reconstruct:
+            _, output = self.run_analysis(diagnostic_components=3)
+        decompose.assert_not_called()
+        reconstruct.assert_not_called()
+        workbook = self.open_workbook()
+        self.assertEqual(
+            set(workbook.sheetnames) & set(analysis.OUTPUT_SHEETS), set(analysis.BASE_SHEETS),
+        )
+        self.assertFalse(self.parameters(workbook)["diagnostics_enabled"])
+        self.assertNotIn("centered_variance_rank", self.parameters(workbook))
+        self.assertNotIn("Mean-centered ranks", output)
+        self.assertNotIn("reconstruction:", output)
+        self.assertNotIn("Residual noise checks", output)
+
+    def test_default_plot_shows_only_svd_rank_figure(self):
+        def inspect_plot(*args, **kwargs):
+            self.assertEqual(len(plt.get_fignums()), 1)
+            self.assertEqual(len(plt.gcf().axes), 2)
+            self.assertEqual(plt.gcf().axes[0].get_title(), "MRE singular values")
+            self.assertEqual(plt.gcf().axes[1].get_title(), "Explained spectral energy")
+
+        with patch.object(plt, "show", side_effect=inspect_plot):
+            self.run_analysis(plot=True)
+        self.assertEqual(plt.get_fignums(), [])
+
+    def test_basic_rerun_clears_previous_optional_outputs(self):
+        self.run_analysis(reconstruction_ranks=[2, 5])
+        self.run_analysis(min_nm=200, max_nm=220)
+        workbook = self.open_workbook()
+        self.assertTrue(set(analysis.BASE_SHEETS).issubset(workbook.sheetnames))
+        self.assertTrue(set(analysis.DIAGNOSTIC_SHEETS).isdisjoint(workbook.sheetnames))
+        self.assertFalse(self.parameters(workbook)["diagnostics_enabled"])
+        self.assertEqual(self.parameters(workbook)["retained_wavelength_rows"], 21)
+        self.assertEqual(list(workbook["SESCA_results"].values), [("keep", "SESCA_results")])
+        self.assertEqual(workbook["CD_subtr"]["C2"].value, "=A2-B2")
+
+    def test_cli_without_reconstruction_flag_runs_only_svd(self):
+        result = self.run_cli("--plot")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        workbook = self.open_workbook()
+        self.assertFalse(self.parameters(workbook)["diagnostics_enabled"])
+        self.assertTrue(set(analysis.DIAGNOSTIC_SHEETS).isdisjoint(workbook.sheetnames))
+        self.assertIn("uncentered SVD only", result.stdout)
+        self.assertNotIn("Mean-centered ranks", result.stdout)
+
+    def test_cli_supports_reconstruction_ranks_and_diagnostic_component_count(self):
+        result = self.run_cli(
+            "--diagnostic-components", "3", "--reconstruction-ranks", "1", "2", "2",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        workbook = self.open_workbook()
+        self.assertIn(analysis.COMPARISON_SHEET, workbook.sheetnames)
+        self.assertIn(analysis.PATTERNS_SHEET, workbook.sheetnames)
+        self.assertTrue(self.parameters(workbook)["diagnostics_enabled"])
+
+    def test_exported_scores_patterns_and_reconstructions_match_saved_inputs(self):
+        self.run_analysis(reconstruction_ranks=[2, 5], diagnostic_components=1)
+        workbook = self.open_workbook()
+        inputs = list(workbook[analysis.INPUT_SHEET].values)
+        wavelengths = np.asarray([row[0] for row in inputs[1:]])
+        spectra = np.asarray([row[1:] for row in inputs[1:]]).T
+        patterns = list(workbook[analysis.PATTERNS_SHEET].values)
+        scores = list(workbook[analysis.SCORES_SHEET].values)
+        self.assertEqual(patterns[0], ("mode", "wavelength_nm", "offset_MRE", *[
+            f"SV{i + 1}" for i in range(len(self.names))
+        ]))
+        self.assertEqual(scores[0], ("mode", "spectrum", *[
+            f"SV{i + 1}" for i in range(len(self.names))
+        ]))
+        for mode, component_count in (("uncentered", 8), ("centered", 7)):
+            with self.subTest(mode=mode):
+                mode_patterns = [row for row in patterns[1:] if row[0] == mode]
+                mode_scores = [row for row in scores[1:] if row[0] == mode]
+                self.assertEqual([row[1] for row in mode_scores], self.names)
+                np.testing.assert_array_equal([row[1] for row in mode_patterns], wavelengths)
+                loading_matrix = np.asarray([row[3:3 + component_count] for row in mode_patterns]).T
+                score_matrix = np.asarray([row[2:2 + component_count] for row in mode_scores])
+                offsets = np.asarray([row[2] for row in mode_patterns])
+                np.testing.assert_allclose(score_matrix @ loading_matrix + offsets, spectra, atol=1e-9)
+                if mode == "uncentered":
+                    uncentered_scores, uncentered_patterns = score_matrix, loading_matrix
+                else:
+                    self.assertTrue(all(row[-1] is None for row in mode_patterns))
+                    self.assertTrue(all(row[-1] is None for row in mode_scores))
+
+        reconstructions = list(workbook[analysis.RECONSTRUCTION_SHEET].values)
+        self.assertEqual(reconstructions[0], (
+            "rank", "spectrum", "wavelength_nm", "observed_MRE", "reconstructed_MRE", "residual_MRE",
+        ))
+        for rank in (2, 5):
+            model_rows = [row for row in reconstructions[1:] if row[0] == rank]
+            self.assertEqual(len(model_rows), spectra.size)
+            expected = uncentered_scores[:, :rank] @ uncentered_patterns[:rank]
+            for spectrum_index, name in enumerate(self.names):
+                rows = [row for row in model_rows if row[1] == name]
+                np.testing.assert_array_equal([row[2] for row in rows], wavelengths)
+                np.testing.assert_allclose([row[3] for row in rows], spectra[spectrum_index], atol=1e-9)
+                np.testing.assert_allclose([row[4] for row in rows], expected[spectrum_index], atol=1e-9)
+                np.testing.assert_allclose(
+                    [row[5] for row in rows], spectra[spectrum_index] - expected[spectrum_index], atol=1e-9,
+                )
+        self.assertEqual(list(workbook[analysis.CENTERED_SHEET].values)[0], (
+            "component", "singular_value_MRE", "variance_fraction",
+            "cumulative_variance_fraction", "above_noise_threshold",
+        ))
+
+    def test_exported_noise_correlations_are_blank_and_explained_when_undefined(self):
+        spectra = np.zeros((2, 6))
+        spectra[0, 0] = spectra[1, 1] = 1
+        cases = (
+            (np.arange(190, 196), spectra, "negligible or constant"),
+            (np.array([190, 191, 193, 194, 197, 199]), self.spectra[:, :6], "irregular"),
+        )
+        for wavelengths, values, reason in cases:
+            with self.subTest(reason=reason):
+                names = self.names[:len(values)]
+                self.write_workbook(wavelengths=wavelengths, spectra=values, names=names)
+                self.run_analysis(reconstruction_ranks=[2])
+                rows = list(self.open_workbook()[analysis.NOISE_SHEET].values)
+                self.assertEqual(rows[0], (
+                    "rank", "spectrum", "residual_mean_MRE", "residual_rms_MRE",
+                    "lag1_correlation", "lag1_pairs", "lag1_status",
+                ))
+                self.assertEqual(len(rows) - 1, len(names))
+                for row in rows[1:]:
+                    self.assertIsNone(row[4])
+                    self.assertIn(reason, row[6])
+
+    def test_roundoff_residuals_do_not_receive_noise_variation_coefficients(self):
+        self.run_analysis(reconstruction_ranks=[len(self.names)])
+        rows = list(self.open_workbook()[analysis.COMPARISON_SHEET].values)
+        headers, values = rows
+        self.assertLess(values[headers.index("relative_Frobenius_error")], 1e-13)
+        self.assertIsNone(values[headers.index("spectrum_residual_rms_CV")])
+        self.assertIsNone(values[headers.index("wavelength_residual_rms_CV")])
+
+    def test_invalid_diagnostic_options_preserve_the_source_workbook(self):
+        original = self.workbook_file.read_bytes()
+        for arguments in (
+            ["--reconstruction-ranks", "0"],
+            ["--reconstruction-ranks", "9"],
+            ["--diagnostic-components", "0"],
+        ):
+            with self.subTest(arguments=arguments):
+                result = self.run_cli(*arguments)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(self.workbook_file.read_bytes(), original)
 
     def test_cli_supports_folder_with_spaces_trailing_separator_and_range_overrides(self):
         result = self.run_cli("--min-wavelength", "200", "--max-wavelength", "220")

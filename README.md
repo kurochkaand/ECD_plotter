@@ -25,7 +25,7 @@ python deconvolution.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14-Cd" -
 Reads `MRE`; adds `SESCA_results` and `SESCA_fit` to the same workbook.
 Add `--shared-scaling` for one automatic factor, or `--shared-scaling 1.33334` to fix it.
 
-## MRE component count (SVD)
+## MRE components (SVD)
 
 ```powershell
 python component_analysis_mre.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14-Cd" --plot
@@ -33,11 +33,23 @@ python component_analysis_mre.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10
 
 Reads `MRE` from `<folder-name>-combined.xlsx` beside the data folder. Analyzes
 190–250 nm by default, excluding any wavelength row with a blank in any spectrum.
-Adds `MRE_SVD_results`, `MRE_SVD_parameters`, and `MRE_SVD_input` to the same workbook.
-Reports the noise-threshold rank and the 99.5% spectral-energy rank, without a
-four-component cap. No concentration table or additional normalization is needed.
+By default, runs only uncentered SVD and saves `MRE_SVD_results`,
+`MRE_SVD_parameters`, and `MRE_SVD_input`. Reports the noise-threshold rank and the
+99.5% spectral-energy rank without a four-component cap. No concentration table
+or additional normalization is needed.
 Use `--min-wavelength 195 --max-wavelength 245` to change the range; omit `--plot`
-to save results without opening plots. [Details](docs/REFERENCE.md#estimate-component-count-from-mre).
+to save results without opening plots. Add `--reconstruction-ranks` to enable all
+five additional diagnostics: wavelength patterns, per-spectrum scores,
+reconstruction/residual comparisons, mean-centering, and residual-noise checks:
+
+```powershell
+python component_analysis_mre.py --folder "X:\Cations_and_PGA\ECD-Szeged\K.Andrii\260722-PLGA-pH-titrat" --reconstruction-ranks 2 5 --diagnostic-components 5 --plot
+```
+
+Diagnostic plots show the first five components by default; all component vectors
+are saved. Scores are mathematical coefficients, not component percentages.
+A basic rerun removes earlier optional diagnostic sheets.
+[Details](docs/REFERENCE.md#estimate-component-count-from-mre).
 
 ## Spectral components
 

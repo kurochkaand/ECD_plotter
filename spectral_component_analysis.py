@@ -295,9 +295,29 @@ def analyze_singular_values(
     if total <= np.finfo(float).eps:
         raise ValueError("The selected spectral matrix has effectively zero numerical rank.")
 
-    explained = squared / total
+    return summarize_singular_values(singular_values, matrix.shape)
+
+
+def summarize_singular_values(
+    singular_values: np.ndarray, matrix_shape: tuple[int, int], *, allow_zero_rank: bool = False,
+) -> SVDResult:
+    """Summarize an existing decomposition, including zero centered variation."""
+    if not singular_values.size or singular_values[0] == 0:
+        if not allow_zero_rank:
+            raise ValueError("The selected spectral matrix has effectively zero numerical rank.")
+        return SVDResult(
+            singular_values=singular_values, explained_energy_ratio=np.zeros_like(singular_values),
+            cumulative_energy_ratio=np.zeros_like(singular_values), gavish_donoho_threshold=0.0,
+            gavish_donoho_rank=0, variance_rank=0,
+        )
+
+    # A common scale cancels in the fractions and avoids squaring very large values.
+    squared = (singular_values / singular_values[0])**2
+    explained = squared / squared.sum()
     cumulative = np.cumsum(explained)
-    gd_rank, threshold = gavish_donoho_rank(singular_values, matrix.shape)
+    gd_rank, threshold = gavish_donoho_rank(singular_values, matrix_shape)
+    if allow_zero_rank:
+        gd_rank = int(np.count_nonzero(singular_values > threshold))
     variance_rank = int(np.searchsorted(cumulative, CUMULATIVE_VARIANCE_TARGET) + 1)
 
     return SVDResult(

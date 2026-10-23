@@ -457,18 +457,23 @@ running. Rerunning `merge.py` recreates the entire workbook, so run
 .\.venv\Scripts\python.exe component_analysis_mre.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14-Cd" --plot
 ```
 
-This SVD-only command reads the numeric `MRE` sheet from
+This SVD command reads the numeric `MRE` sheet from
 `<folder-name>-combined.xlsx` beside the raw-data folder, using every spectrum
 column. The concentration table, raw CSV files, and SESCA installation are not
 needed. Saved MRE values are used directly, without further concentration
-normalization, unit conversion, mean-centering, or scaling of individual spectra.
+normalization, unit conversion, or scaling of individual spectra. By default it
+computes only the uncentered singular values and rank estimates. Supplying
+`--reconstruction-ranks` enables all five additional diagnostics, including the
+separate mean-centered comparison.
 
 | Option | Purpose | Default |
 | --- | --- | --- |
 | `--folder PATH` | Data folder originally passed to merge. | Required. |
 | `--min-wavelength VALUE` | Inclusive lower wavelength bound in nm. | `190`. |
 | `--max-wavelength VALUE` | Inclusive upper wavelength bound in nm. | `250`. |
-| `--plot` | Display singular values and explained spectral energy after saving. | No plot window. |
+| `--reconstruction-ranks INTEGER [INTEGER ...]` | Enable all five additional diagnostics and reconstruct these uncentered ranks. At least one valid rank is required. | Omitted: SVD rank analysis only. |
+| `--diagnostic-components INTEGER` | Maximum optional patterns and score profiles to display with `--reconstruction-ranks`; does not enable diagnostics itself or limit exports/rank estimates. | `5`. |
+| `--plot` | Display SVD rank plots; also display additional diagnostic figures when `--reconstruction-ranks` is present. | No plot windows. |
 
 For example, to analyze 200–240 nm without opening plot windows:
 
@@ -482,23 +487,100 @@ wavelengths are sorted ascending; the source MRE sheet remains unchanged. At lea
 two spectra and five complete wavelength rows are required. Duplicate wavelengths,
 formulas, spreadsheet errors, nonnumeric values, and all-zero data are rejected.
 
-Three sheets are added to the same workbook:
+Basic runs save the first three sheets below. With `--reconstruction-ranks`, all
+ten sheets are saved to the same workbook:
 
 | Sheet | Contents |
 | --- | --- |
 | `MRE_SVD_results` | Every singular value, individual/cumulative spectral-energy fractions, and whether each value exceeds the noise threshold. |
-| `MRE_SVD_parameters` | Both rank estimates, noise threshold, 99.5% energy target, requested/retained bounds, spectrum count, and retained/excluded row counts. |
+| `MRE_SVD_parameters` | Rank estimates, thresholds, 99.5% target, requested/retained bounds, spectrum and row counts, and whether diagnostics ran. Diagnostic mode adds centered ranks, component conventions, and noise settings. |
 | `MRE_SVD_input` | Exact retained numeric MRE matrix, with wavelength and original spectrum labels. |
+| `MRE_SVD_patterns` | Signed unit-length wavelength patterns for each analysis mode, with the mean-spectrum offset needed for reconstruction. |
+| `MRE_SVD_scores` | Signed coefficients of every exported pattern in each spectrum, for both analysis modes. |
+| `MRE_SVD_centered` | Singular values, variance fractions, cumulative fractions, and noise-threshold results after subtracting the mean spectrum. |
+| `MRE_SVD_reconstruction` | Observed MRE, reconstructed MRE, and residual (`observed - reconstructed`) for each requested rank, spectrum, and retained wavelength. |
+| `MRE_SVD_comparison` | Retained signal-energy fraction, relative Frobenius reconstruction error, overall residual RMS, and variation of RMS across spectra/wavelengths for each compared rank. |
+| `MRE_SVD_noise` | Per-spectrum residual mean, RMS, and lag-one correlation for each reconstruction rank. |
+| `MRE_SVD_noise_wavelength` | Residual mean and RMS across spectra at each retained wavelength and reconstruction rank. |
 
 The Gavish–Donoho rank uses the same unknown-noise threshold approximation as
 `spectral_component_analysis.py`. The second estimate is the number of singular
 values needed to reach 99.5% of the sum of squared signal values. Neither estimate
 is capped at four components. These are estimates of independent spectral patterns,
 not proof of a chemical species count; spectral overlap, fixed mixture ratios,
-baseline drift, and noise affect their interpretation. PCA and MCR-ALS are not run
-by this command.
+baseline drift, and noise affect their interpretation. In diagnostic mode the
+mean-centered decomposition provides a PCA-style comparison of spectral variation;
+MCR-ALS and chemical-fraction fitting are not run by this command.
 
-Rerunning replaces only the three SVD sheets. Other sheets, including MRE values,
+### Inspect the five diagnostics
+
+The original rank estimates are the starting point. For example, a noise-threshold
+rank of 5 and a 99.5% energy rank of 2 mean that the first two patterns carry most
+of the total squared signal, while three weaker patterns also exceed the selected
+noise threshold. This difference alone does not establish whether those weaker
+patterns represent chemistry, drift, or noise.
+
+Add the reconstruction flag to save all five diagnostics and open their figures:
+
+```powershell
+.\.venv\Scripts\python.exe component_analysis_mre.py --folder "X:\Cations_and_PGA\ECD-Szeged\K.Andrii\260722-PLGA-pH-titrat" --reconstruction-ranks 2 5 --diagnostic-components 5 --plot
+```
+
+Omit `--reconstruction-ranks 2 5` to run only SVD rank analysis. With the flag,
+each distinct requested rank is reconstructed; duplicate ranks are merged.
+Omit `--plot` to save the selected mode's tables without opening figures.
+
+1. **Wavelength patterns.** Inspect the first five signed curves in
+   `MRE_SVD_patterns` for recognizable bands, broad offsets, or oscillations.
+   With spectra as matrix rows and wavelengths as columns, these patterns are
+   rows of `Vt` in `X = U diag(s) Vt`. All available patterns are exported;
+   `--diagnostic-components` controls only how many appear in the figures.
+2. **Per-spectrum scores.** `MRE_SVD_scores` contains `U diag(s)`, the coefficients
+   multiplying those patterns. Pattern values are dimensionless and scores have
+   MRE units. Both may be negative, and a pattern/score pair can change sign
+   together without changing the reconstruction. Scores are not concentrations,
+   ratios, or percentages. Score plots follow workbook sample order; compare
+   them with your actual experimental conditions separately. Sample order does
+   not by itself establish time or pH.
+3. **Rank comparison.** Inspect reconstructed curves and their signed residuals
+   for each uncentered rank in `MRE_SVD_reconstruction`. Reconstruction and noise
+   tables use the uncentered analysis only. The summary in
+   `MRE_SVD_comparison` reports the retained squared-signal fraction, residual
+   Frobenius norm divided by the original matrix's Frobenius norm, and RMS in
+   MRE units. Increasing the rank cannot increase this in-sample least-squares error;
+   decide whether the removed residual has a meaningful spectral shape as well
+   as whether its magnitude is smaller.
+4. **Mean-centering comparison.** The `centered` mode subtracts, at each
+   wavelength, the average across all spectra. Its singular-value energy
+   fractions therefore describe variation about the mean, rather than the
+   original matrix's total signal energy. Centering permits at most
+   `min(number_of_spectra - 1, number_of_wavelengths)` components. The centered
+   noise-threshold calculation uses `number_of_spectra - 1` as its effective
+   sample dimension. Reconstruct a centered spectrum as its saved mean-spectrum
+   offset plus the sum of score times wavelength pattern. For the `uncentered`
+   mode the offset is zero. Identical spectra have no centered variation and
+   receive centered ranks of zero.
+5. **Residual-noise checks.** Look for changes in residual RMS with spectrum or
+   wavelength, and for substantial adjacent-wavelength correlation. These can
+   reveal unequal noise levels, correlated noise, or structure left by an
+   insufficient rank. Lag-one correlation uses only adjacent points from the
+   original regular wavelength grid, assessed within the requested range before
+   missing-row exclusions. Excluded rows never create artificial neighbor pairs
+   across gaps. Correlation is unavailable for an irregular grid, negligible or
+   constant residual variation, or fewer than three valid neighbor pairs; its
+   cell is blank and the noise sheet records the reason.
+
+Residual diagnostics are exploratory. A fit's residuals cannot establish the
+Gavish–Donoho assumption of independent, equal-variance noise. Baseline subtraction
+can introduce shared errors; concentration scaling can change noise amplitudes
+between spectra; smoothing can correlate neighboring wavelengths. Whether merge
+smoothing was applied is unknown when it is not recorded in the workbook's
+metadata. Use replicate measurements or independent instrument-noise information
+when assessing the threshold's scientific suitability.
+
+Rerunning replaces only the SVD output sheets. A basic rerun removes the seven
+optional diagnostic sheets from any earlier run, so old diagnostics are not
+mistaken for results of the current wavelength range. Other sheets, including MRE values,
 conversion metadata, and SESCA results, are retained. Analysis or save failures
 leave the source workbook intact. Close the workbook in Excel before running.
 Rerun this command after `merge.py`, which recreates the combined workbook.

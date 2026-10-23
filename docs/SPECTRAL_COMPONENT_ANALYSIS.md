@@ -6,7 +6,16 @@ MCR-ALS. See [the project cheat sheet](../README.md) for Python installation and
 For SVD directly from a merged workbook's `MRE` sheet, use
 [`component_analysis_mre.py`](REFERENCE.md#estimate-component-count-from-mre).
 It accepts `--folder`, saves results in the combined workbook, and displays plots
-only with `--plot`. The separate-workbook workflow below also runs PCA and optional MCR-ALS.
+only with `--plot`. By default it performs only uncentered SVD rank analysis.
+Adding `--reconstruction-ranks 2 5` enables mean-centered SVD, signed wavelength
+patterns and per-spectrum scores, rank reconstruction comparisons, and exploratory
+residual-noise checks. Its default range is 190–250 nm, and it
+excludes a wavelength if any spectrum has a blank rather than interpolating.
+Scores are mathematical coefficients, not component percentages. See the linked
+reference for all workbook sheets, flags, and interpretation.
+
+The separate-workbook workflow below runs PCA and optional MCR-ALS with its own
+defaults and output files.
 
 ## Input workbook
 
