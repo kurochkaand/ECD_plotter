@@ -280,9 +280,13 @@ def gavish_donoho_rank(singular_values: np.ndarray, matrix_shape: tuple[int, int
     return max(rank, 1), threshold
 
 
-def analyze_singular_values(spectra: np.ndarray) -> SVDResult:
+def analyze_singular_values(
+    spectra: np.ndarray, *, mean_center: bool | None = None,
+) -> SVDResult:
+    """Analyze rank, optionally overriding this script's centering setting."""
     matrix = spectra.copy()
-    if MEAN_CENTER_FOR_RANK:
+    center = MEAN_CENTER_FOR_RANK if mean_center is None else mean_center
+    if center:
         matrix -= matrix.mean(axis=0, keepdims=True)
 
     singular_values = np.linalg.svd(matrix, full_matrices=False, compute_uv=False)

@@ -3,6 +3,11 @@
 Analyze an Excel workbook on Windows using SVD, PCA, and optional non-negative
 MCR-ALS. See [the project cheat sheet](../README.md) for Python installation and setup.
 
+For SVD directly from a merged workbook's `MRE` sheet, use
+[`component_analysis_mre.py`](REFERENCE.md#estimate-component-count-from-mre).
+It accepts `--folder`, saves results in the combined workbook, and displays plots
+only with `--plot`. The separate-workbook workflow below also runs PCA and optional MCR-ALS.
+
 ## Input workbook
 
 - Excel sheet name: `Sheet1`.

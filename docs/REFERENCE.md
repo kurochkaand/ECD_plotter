@@ -451,6 +451,58 @@ save error leaves the original workbook intact. Close the workbook in Excel befo
 running. Rerunning `merge.py` recreates the entire workbook, so run
 `deconvolution.py` again afterward if fitting is needed.
 
+## Estimate component count from MRE
+
+```powershell
+.\.venv\Scripts\python.exe component_analysis_mre.py --folder "X:\Cations_and_PGA\ECD-Prague\2026-10-14-Cd" --plot
+```
+
+This SVD-only command reads the numeric `MRE` sheet from
+`<folder-name>-combined.xlsx` beside the raw-data folder, using every spectrum
+column. The concentration table, raw CSV files, and SESCA installation are not
+needed. Saved MRE values are used directly, without further concentration
+normalization, unit conversion, mean-centering, or scaling of individual spectra.
+
+| Option | Purpose | Default |
+| --- | --- | --- |
+| `--folder PATH` | Data folder originally passed to merge. | Required. |
+| `--min-wavelength VALUE` | Inclusive lower wavelength bound in nm. | `190`. |
+| `--max-wavelength VALUE` | Inclusive upper wavelength bound in nm. | `250`. |
+| `--plot` | Display singular values and explained spectral energy after saving. | No plot window. |
+
+For example, to analyze 200–240 nm without opening plot windows:
+
+```powershell
+.\.venv\Scripts\python.exe component_analysis_mre.py --folder "X:\Data\experiment" --min-wavelength 200 --max-wavelength 240
+```
+
+Any wavelength row with a blank in **any** spectrum is excluded from the analysis
+matrix. Excluded HT points are never interpolated or treated as zero. Retained
+wavelengths are sorted ascending; the source MRE sheet remains unchanged. At least
+two spectra and five complete wavelength rows are required. Duplicate wavelengths,
+formulas, spreadsheet errors, nonnumeric values, and all-zero data are rejected.
+
+Three sheets are added to the same workbook:
+
+| Sheet | Contents |
+| --- | --- |
+| `MRE_SVD_results` | Every singular value, individual/cumulative spectral-energy fractions, and whether each value exceeds the noise threshold. |
+| `MRE_SVD_parameters` | Both rank estimates, noise threshold, 99.5% energy target, requested/retained bounds, spectrum count, and retained/excluded row counts. |
+| `MRE_SVD_input` | Exact retained numeric MRE matrix, with wavelength and original spectrum labels. |
+
+The Gavish–Donoho rank uses the same unknown-noise threshold approximation as
+`spectral_component_analysis.py`. The second estimate is the number of singular
+values needed to reach 99.5% of the sum of squared signal values. Neither estimate
+is capped at four components. These are estimates of independent spectral patterns,
+not proof of a chemical species count; spectral overlap, fixed mixture ratios,
+baseline drift, and noise affect their interpretation. PCA and MCR-ALS are not run
+by this command.
+
+Rerunning replaces only the three SVD sheets. Other sheets, including MRE values,
+conversion metadata, and SESCA results, are retained. Analysis or save failures
+leave the source workbook intact. Close the workbook in Excel before running.
+Rerun this command after `merge.py`, which recreates the combined workbook.
+
 ## Analyze spectral components
 
 ```powershell
